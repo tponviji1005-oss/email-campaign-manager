@@ -1,0 +1,95 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum CampaignStatus {
+  DRAFT
+  SENDING
+  SENT
+  FAILED
+}
+
+model User {
+  id        String     @id @default(uuid())
+  googleId  String     @unique
+  email     String     @unique
+  name      String
+  avatarUrl String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  campaigns Campaign[]
+
+  @@index([email])
+}
+
+model Campaign {
+  id         String         @id @default(uuid())
+  userId     String
+  senderName String
+  subject    String
+  body       String
+  status     CampaignStatus @default(DRAFT)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  user        User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  recipients  Recipient[]
+  attachments Attachment[]
+  history     CampaignHistory[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Recipient {
+  id         String   @id @default(uuid())
+  campaignId String
+  email      String
+  isValid    Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@unique([campaignId, email])
+  @@index([email])
+}
+
+model Attachment {
+  id         String   @id @default(uuid())
+  campaignId String
+  fileName   String
+  fileUrl    String
+  mimeType   String?
+  sizeBytes  Int?
+  createdAt  DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+}
+
+model CampaignHistory {
+  id               String   @id @default(uuid())
+  campaignId       String
+  totalRecipients  Int
+  validRecipients  Int
+  invalidRecipients Int
+  sentAt           DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([sentAt])
+}
