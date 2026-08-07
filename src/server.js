@@ -1,5 +1,6 @@
 const app = require('./app');
 require('./workers/email.worker');
+require('./queues/email.events');
 
 const PORT = process.env.PORT || 3000;
 

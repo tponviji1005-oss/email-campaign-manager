@@ -27,14 +27,24 @@ router.post('/queue', async (req, res) => {
   }
 
   try {
-    const job = await emailQueue.add('sendEmail', {
-      from,
-      to,
-      subject,
-      text,
-      html,
-      attachments,
-    });
+    const job = await emailQueue.add(
+      'sendEmail',
+      {
+        from,
+        to,
+        subject,
+        text,
+        html,
+        attachments,
+      },
+      {
+        attempts: 3,
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      }
+    );
     return res.status(200).json({ success: true, message: 'Email queued successfully', jobId: job.id });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to queue email' });
