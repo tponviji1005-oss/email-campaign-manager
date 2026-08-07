@@ -1,4 +1,5 @@
 const app = require('./app');
+require('./workers/email.worker');
 
 const PORT = process.env.PORT || 3000;
 
