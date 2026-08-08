@@ -49,12 +49,36 @@ function isErrorLike(value: unknown): value is Error {
   return value instanceof Error;
 }
 
+// Node's http server throws `Error: aborted` at `abortIncoming` whenever the
+// client disconnects while the SSR streaming response is still in flight. That
+// happens constantly during normal development (navigation, reload, HMR full
+// reload) and is not an application error, but TanStack Start's renderer only
+// treats `AbortError` as benign, so the raw node abort bubbles up and gets
+// surfaced as a misleading 500. Detect it by its unique stack marker and drop
+// it from the log entirely. Any real error — regardless of message — still
+// passes through unchanged.
+const NODE_CLIENT_ABORT_STACK_MARKER = /abortIncoming \(node:_http_server/;
+
+function isNodeClientAbort(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < CAUSE_DEPTH_LIMIT && current != null; depth++) {
+    if (!(current instanceof Error)) return false;
+    if (current.message === "aborted" && NODE_CLIENT_ABORT_STACK_MARKER.test(current.stack ?? "")) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
 // Wrap console.error so errors logged by any layer — including h3's internal
 // unhandled-error logging, which this file cannot hook directly — are both
 // recorded for consumeLastCapturedError and expanded before serialization.
 const originalConsoleError = console.error.bind(console);
 console.error = (...args: unknown[]) => {
-  const expanded = args.map((arg) => {
+  const relevant = args.filter((arg) => !isNodeClientAbort(arg));
+  if (relevant.length === 0) return;
+  const expanded = relevant.map((arg) => {
     if (!isErrorLike(arg)) return arg;
     record(arg);
     return describeError(arg);

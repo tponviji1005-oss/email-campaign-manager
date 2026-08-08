@@ -12,6 +12,9 @@ node_modules/
 dist/
 build/
 
+# Uploaded attachments
+uploads/
+
 # OS Files
 .DS_Store
 Thumbs.db

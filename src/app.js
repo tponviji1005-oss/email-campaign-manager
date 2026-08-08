@@ -10,10 +10,13 @@ const sessionConfig = require('./config/session');
 const authRoutes = require('./routes/auth.routes');
 const campaignRoutes = require('./routes/campaign.routes');
 const emailRoutes = require('./routes/email.routes');
+const dashboardRoutes = require('./routes/dashboard.routes');
+
+const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const app = express();
 
-app.use(cors());
+app.use(cors({ origin: FRONTEND_URL, credentials: true }));
 app.use(express.json());
 app.use(session(sessionConfig));
 app.use(passport.initialize());
@@ -21,5 +24,6 @@ app.use(passport.session());
 app.use(authRoutes);
 app.use('/campaigns', campaignRoutes);
 app.use('/email', emailRoutes);
+app.use('/dashboard', dashboardRoutes);
 
 module.exports = app;
