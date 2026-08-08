@@ -1,4 +1,5 @@
 const session = require('express-session');
+const RedisSessionStore = require('./sessionStore');
 
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -8,6 +9,7 @@ if (!process.env.SESSION_SECRET) {
 
 const sessionConfig = {
   secret: process.env.SESSION_SECRET,
+  store: new RedisSessionStore(),
   resave: false,
   saveUninitialized: false,
   cookie: {

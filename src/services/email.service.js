@@ -1,9 +1,13 @@
 const nodemailer = require('nodemailer');
 const { getTransporterConfig } = require('../config/mail');
 
+let transporter = null;
+
 function createTransporter() {
-  const config = getTransporterConfig();
-  return nodemailer.createTransport(config);
+  if (!transporter) {
+    transporter = nodemailer.createTransport(getTransporterConfig());
+  }
+  return transporter;
 }
 
 async function sendEmail(options) {
@@ -31,16 +35,35 @@ async function sendEmail(options) {
 
   const transporter = createTransporter();
 
-  await transporter.sendMail({
-    from,
-    to,
-    subject,
-    text,
-    html,
-    attachments,
-  });
+  const tSendStart = Date.now();
+  console.log(`[diag][sendmail] sendMail START at ${tSendStart} to ${to}`);
+  try {
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text,
+      html,
+      attachments,
+    });
+  } catch (error) {
+    console.error('[smtp][sendMail] failed. Error diagnostics:', {
+      message: error && error.message,
+      code: error && error.code,
+      responseCode: error && error.responseCode,
+      command: error && error.command,
+      response: error && error.response,
+    });
+    throw error;
+  }
+  console.log(`[diag][sendmail] sendMail DONE at ${Date.now()} (elapsed ${Date.now() - tSendStart}ms)`);
 
   return { success: true };
 }
 
-module.exports = { createTransporter, sendEmail };
+async function verifySmtp() {
+  const transporter = createTransporter();
+  return transporter.verify();
+}
+
+module.exports = { createTransporter, sendEmail, verifySmtp };

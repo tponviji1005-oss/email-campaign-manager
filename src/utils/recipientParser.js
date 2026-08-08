@@ -34,7 +34,12 @@ async function parseRecipients(input) {
     const domain = extractDomain(recipient);
     let mxPromise = mxCache.get(domain);
     if (mxPromise === undefined) {
-      mxPromise = validateMX(recipient);
+      mxPromise = validateMX(recipient).catch((error) => {
+        console.warn(
+          `DNS verification unavailable for ${domain} (${error.code || error.message}); keeping address valid`
+        );
+        return true;
+      });
       mxCache.set(domain, mxPromise);
     }
 
