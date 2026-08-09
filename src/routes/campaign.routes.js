@@ -4,6 +4,8 @@ const { parseRecipients } = require('../utils/recipientParser');
 const { getPrisma } = require('../config/prisma');
 const { emailQueue } = require('../queues/email.queue');
 const { uploadAttachments, removeSavedFiles } = require('../config/uploads');
+const { getEmailProvider, getDailyEmailLimit, DAY_IN_MS } = require('../config/brevo');
+const { scheduleBrevoCampaign } = require('../services/brevo.scheduler');
 const { requireAuth } = require('../middleware/requireAuth');
 
 const router = express.Router();
@@ -160,9 +162,6 @@ router.post(
           subject: subject.trim(),
           body,
           status: 'SENDING',
-          recipients: {
-            create: recipientList.map((email) => ({ email, isValid: true })),
-          },
           attachments: {
             create: attachmentFiles.map((file) => ({
               fileName: file.originalname,
@@ -174,18 +173,39 @@ router.post(
         },
       });
 
+      await prisma.recipient.createMany({
+        data: recipientList.map((email) => ({
+          campaignId: campaign.id,
+          email,
+          isValid: true,
+        })),
+      });
+
       const from = buildFrom(senderName.trim());
       const attachmentDescriptors = attachmentsForJobs(attachmentFiles);
 
       const tQueued = Date.now();
       console.log(`[diag][campaign] created campaign ${campaign.id} at ${tQueued} for ${recipientList.length} recipients`);
 
-      await Promise.all(
-        recipientList.map((email) =>
-          emailQueue.add(
-            'sendEmail',
-            {
+      const provider = getEmailProvider();
+      const isBrevo = provider === 'brevo';
+
+      if (isBrevo && attachmentDescriptors.length === 0) {
+        await scheduleBrevoCampaign({
+          campaignId: campaign.id,
+          recipients: recipientList,
+          subject: subject.trim(),
+          text: body,
+          sender: { name: senderName.trim() },
+        });
+      } else {
+        const dailyLimit = isBrevo ? getDailyEmailLimit() : 0;
+        await emailQueue.addBulk(
+          recipientList.map((email, index) => ({
+            name: 'sendEmail',
+            data: {
               from,
+              senderName: senderName.trim(),
               to: email,
               subject: subject.trim(),
               text: body,
@@ -193,13 +213,17 @@ router.post(
               campaignId: campaign.id,
               totalRecipients: recipientList.length,
             },
-            {
+            opts: {
+              jobId: `campaign-${campaign.id}-${email.toLowerCase()}`,
               attempts: 3,
               backoff: { type: 'exponential', delay: 5000 },
-            }
-          )
-        )
-      );
+              removeOnComplete: true,
+              removeOnFail: { age: 7 * 24 * 60 * 60 },
+              ...(isBrevo ? { delay: Math.floor(index / dailyLimit) * DAY_IN_MS } : {}),
+            },
+          }))
+        );
+      }
 
       console.log(`[diag][campaign] jobs queued in ${Date.now() - tQueued}ms`);
 
