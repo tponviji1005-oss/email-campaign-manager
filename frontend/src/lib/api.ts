@@ -64,8 +64,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    credentials: "include",
     ...init,
+    credentials: "include",
     headers: {
       Accept: "application/json",
       ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),

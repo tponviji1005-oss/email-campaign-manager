@@ -130,6 +130,9 @@ function SectionCard({
 function CreateCampaignPage() {
   const navigate = useNavigate();
   const inputRef = useRef<HTMLInputElement>(null);
+  const senderNameRef = useRef<HTMLInputElement>(null);
+  const subjectRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLTextAreaElement>(null);
   const [senderName, setSenderName] = useState("");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
@@ -227,9 +230,22 @@ function CreateCampaignPage() {
   };
 
   const handleSendClick = () => {
-    if (!canSend) {
+    const live = {
+      senderName: senderNameRef.current?.value ?? senderName,
+      subject: subjectRef.current?.value ?? subject,
+      body: bodyRef.current?.value ?? body,
+    };
+    setSenderName(live.senderName);
+    setSubject(live.subject);
+    setBody(live.body);
+    const missing: string[] = [];
+    if (!live.senderName.trim()) missing.push("sender name");
+    if (!live.subject.trim()) missing.push("subject");
+    if (!live.body.trim()) missing.push("email content");
+    if (!parsed || parsed.totalValid === 0) missing.push("at least one validated recipient");
+    if (missing.length > 0) {
       setTouched({ senderName: true, subject: true, body: true });
-      toast.error(`Cannot send yet: ${missingItems.join(", ")}.`);
+      toast.error(`Cannot send yet: ${missing.join(", ")}.`);
       return;
     }
     setConfirmOpen(true);
@@ -272,6 +288,7 @@ function CreateCampaignPage() {
             </Label>
             <Input
               id="senderName"
+              ref={senderNameRef}
               value={senderName}
               onChange={(e) => setSenderName(e.target.value)}
               onBlur={() => setTouched((t) => ({ ...t, senderName: true }))}
@@ -295,6 +312,7 @@ function CreateCampaignPage() {
             </Label>
             <Input
               id="subject"
+              ref={subjectRef}
               value={subject}
               onChange={(e) => setSubject(e.target.value)}
               onBlur={() => setTouched((t) => ({ ...t, subject: true }))}
@@ -318,6 +336,7 @@ function CreateCampaignPage() {
             </Label>
             <Textarea
               id="body"
+              ref={bodyRef}
               value={body}
               onChange={(e) => setBody(e.target.value)}
               onBlur={() => setTouched((t) => ({ ...t, body: true }))}
