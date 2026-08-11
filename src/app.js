@@ -88,6 +88,12 @@ app.use('/email', emailRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/webhooks', webhookRoutes);
 
+// 404 for unknown routes: a consistent JSON body instead of Express's default
+// HTML "Cannot GET /..." page, so a missing route can never leak internals.
+app.use((req, res) => {
+  res.status(404).json({ success: false, message: 'Not found' });
+});
+
 // Final error handler: always respond with JSON, never a stack trace or HTML.
 // Known body-parser failures map to clean 4xx responses; everything else is a
 // sanitized 500 (details are logged server-side, and surfaced in development
@@ -111,7 +117,14 @@ app.use((err, req, res, next) => {
   ) {
     return res.status(400).json({ success: false, message: 'Invalid request body' });
   }
-  console.error('Unhandled error:', err);
+  if (process.env.NODE_ENV === 'production') {
+    // Production logs only the error class name — never messages, stacks, or
+    // the error object, which can embed secrets (DB URLs, provider bodies,
+    // tokens) even after route-level sanitization.
+    console.error('Unhandled error:', (err && err.name) || 'Error');
+  } else {
+    console.error('Unhandled error:', err);
+  }
   const message =
     process.env.NODE_ENV === 'production' ? 'Internal server error' : (err && err.message) || 'Internal server error';
   return res.status(500).json({ success: false, message });

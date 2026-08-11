@@ -1,6 +1,7 @@
 const express = require('express');
 const { handleBrevoWebhookPayload } = require('../services/brevo.webhook.service');
 const { webhookLimiter } = require('../middleware/rateLimit');
+const { sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const router = express.Router();
 
@@ -27,7 +28,7 @@ router.post('/brevo', webhookLimiter, async (req, res) => {
     if (error && error.code === 'INVALID_PAYLOAD') {
       return res.status(400).json({ success: false, message: error.message });
     }
-    console.error('Failed to process Brevo webhook:', error.message);
+    console.error('Failed to process Brevo webhook:', sanitizeErrorMessage(error));
     return res.status(500).json({ success: false, message: 'Failed to process webhook' });
   }
 });

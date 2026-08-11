@@ -9,10 +9,12 @@ const { scheduleBrevoCampaign } = require('../services/brevo.scheduler');
 const { recipientJobId } = require('../utils/jobIdentity');
 const { requireAuth } = require('../middleware/requireAuth');
 const { campaignCreateLimiter, parseRecipientsLimiter } = require('../middleware/rateLimit');
+const { asyncHandler } = require('../middleware/asyncHandler');
+const { sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const router = express.Router();
 
-router.post('/parse-recipients', parseRecipientsLimiter, requireAuth, async (req, res) => {
+router.post('/parse-recipients', parseRecipientsLimiter, requireAuth, asyncHandler(async (req, res) => {
   const { recipients } = req.body || {};
 
   if (typeof recipients !== 'string') {
@@ -40,7 +42,7 @@ router.post('/parse-recipients', parseRecipientsLimiter, requireAuth, async (req
     success: true,
     ...parsed,
   });
-});
+}));
 
 function buildFrom(senderName) {
   const smtpUser = process.env.SMTP_USER;
@@ -106,7 +108,7 @@ router.get('/', requireAuth, async (req, res) => {
 
     return res.json({ success: true, items, total, page, pageSize });
   } catch (error) {
-    console.error('Failed to list campaigns:', error);
+    console.error('Failed to list campaigns:', sanitizeErrorMessage(error));
     return res.status(500).json({ success: false, message: 'Failed to list campaigns' });
   }
 });
@@ -116,7 +118,7 @@ router.post(
   campaignCreateLimiter,
   requireAuth,
   uploadAttachments,
-  async (req, res) => {
+  asyncHandler(async (req, res) => {
     const prisma = await getPrisma();
     let campaign;
 
@@ -281,18 +283,18 @@ router.post(
         message: `Campaign created and queued for ${recipientList.length} recipients`,
       });
     } catch (error) {
-      console.error('Failed to create campaign:', error);
+      console.error('Failed to create campaign:', sanitizeErrorMessage(error));
       if (campaign && campaign.id) {
         try {
           await prisma.campaign.delete({ where: { id: campaign.id } });
         } catch (rollbackError) {
-          console.error('Failed to rollback campaign:', rollbackError);
+          console.error('Failed to rollback campaign:', sanitizeErrorMessage(rollbackError));
         }
       }
       await removeSavedFiles(req);
       return res.status(500).json({ success: false, message: 'Failed to create campaign' });
     }
   }
-);
+));
 
 module.exports = router;

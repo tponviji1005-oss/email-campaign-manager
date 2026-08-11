@@ -10,6 +10,16 @@ function redactEmail(value) {
   return String(value).replace(EMAIL_REGEX, REDACTED);
 }
 
+// URI-style connection strings (postgresql://user:pass@host, redis://:pass@host)
+// can embed credentials. Replace scheme://user:pass@ with scheme://[redacted]@
+// so DATABASE_URL/REDIS-style strings never reach logs or error text.
+const URL_CREDENTIAL_REGEX = /\b([a-z][a-z0-9+.-]*):\/\/[^\s/@'"]*@/gi;
+
+function redactUrlCredentials(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).replace(URL_CREDENTIAL_REGEX, '$1://[redacted]@');
+}
+
 // Safe display form of a BullMQ job id. Hashed recipient ids
 // (campaign-{id}-{hex}) and batch ids (campaign-{id}-batch-{index}) are kept;
 // anything that could embed a recipient address (any '@') is redacted, which
@@ -49,9 +59,9 @@ function sanitizeErrorMessage(error, fallback) {
     return 'Email provider rejected request';
   }
 
-  const message = redactEmail(err.message || String(error)).trim();
+  const message = redactEmail(redactUrlCredentials(err.message || String(error))).trim();
   if (!message) return fallback || 'unknown error';
   return message.length > 240 ? `${message.slice(0, 240)}...` : message;
 }
 
-module.exports = { redactEmail, safeJobIdForLog, sanitizeErrorMessage, EMAIL_REGEX, REDACTED };
+module.exports = { redactEmail, redactUrlCredentials, safeJobIdForLog, sanitizeErrorMessage, EMAIL_REGEX, REDACTED };

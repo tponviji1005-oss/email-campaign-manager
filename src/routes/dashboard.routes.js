@@ -1,6 +1,7 @@
 const express = require('express');
 const { getPrisma } = require('../config/prisma');
 const { requireAuth } = require('../middleware/requireAuth');
+const { sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const router = express.Router();
 
@@ -31,7 +32,7 @@ router.get('/stats', requireAuth, async (req, res) => {
       failedCampaigns,
     });
   } catch (error) {
-    console.error('Failed to load dashboard stats:', error);
+    console.error('Failed to load dashboard stats:', sanitizeErrorMessage(error));
     return res.status(500).json({ success: false, message: 'Failed to load dashboard stats' });
   }
 });
