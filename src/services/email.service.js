@@ -3,6 +3,7 @@ const path = require('path');
 const nodemailer = require('nodemailer');
 const { getTransporterConfig } = require('../config/mail');
 const { getBrevoConfig, isBrevoConfigured, BREVO_API_BASE_URL, BREVO_TRANSACTIONAL_EMAIL_ENDPOINT } = require('../config/brevo');
+const { redactEmail, sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const BREVO_API_URL = `${BREVO_API_BASE_URL}${BREVO_TRANSACTIONAL_EMAIL_ENDPOINT}`;
 const BREVO_REQUEST_TIMEOUT_MS = 30000;
@@ -55,7 +56,7 @@ async function sendEmail(options) {
   const transporter = createTransporter();
 
   const tSendStart = Date.now();
-  console.log(`[diag][sendmail] sendMail START at ${tSendStart} to ${to}`);
+  console.log(`[diag][sendmail] sendMail START at ${tSendStart}`);
   try {
     await transporter.sendMail({
       from,
@@ -67,11 +68,10 @@ async function sendEmail(options) {
     });
   } catch (error) {
     console.error('[smtp][sendMail] failed. Error diagnostics:', {
-      message: error && error.message,
+      message: sanitizeErrorMessage(error),
       code: error && error.code,
       responseCode: error && error.responseCode,
       command: error && error.command,
-      response: error && error.response,
     });
     throw error;
   }
@@ -204,9 +204,10 @@ async function sendBrevoApiRequest(payload) {
     if (error && error.name === 'AbortError') {
       throw new BrevoApiError('Brevo API request timed out.', { code: 'TIMEOUT' });
     }
-    throw new BrevoApiError(`Brevo API request failed: ${error && error.message}`, {
-      code: 'NETWORK_ERROR',
-    });
+    throw new BrevoApiError(
+      `Brevo API request failed: ${sanitizeErrorMessage(error, 'network error')}`,
+      { code: 'NETWORK_ERROR' }
+    );
   }
   clearTimeout(timeout);
 
@@ -220,7 +221,11 @@ async function sendBrevoApiRequest(payload) {
   if (!response.ok) {
     const status = response.status;
     const apiCode = body && (body.code || (body.error && body.error.code));
-    const message = body && (body.message || (body.error && body.error.message));
+    // Provider error bodies can echo the recipient address (e.g. "Invalid email
+    // address: user@example.com"); scrub it before it can be logged or returned.
+    const message = redactEmail(
+      body && (body.message || (body.error && body.error.message))
+    );
     throw new BrevoApiError(message || `Brevo API returned HTTP ${status}.`, {
       status,
       code: typeof apiCode === 'string' && apiCode ? apiCode : `HTTP_${status}`,

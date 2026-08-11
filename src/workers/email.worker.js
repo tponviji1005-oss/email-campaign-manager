@@ -3,13 +3,15 @@ const { redisConnection } = require('../config/redis');
 const { sendEmail, sendBrevoEmail, sendBrevoBatch } = require('../services/email.service');
 const { getEmailProvider } = require('../config/brevo');
 const { getPrisma } = require('../config/prisma');
+const { cleanupCampaignAttachmentFiles } = require('../config/uploads');
+const { safeJobIdForLog, sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const emailWorker = new Worker(
   'emailQueue',
   async (job) => {
     const tWorker = Date.now();
-    console.log(`[diag][worker] job ${job.id} processing started at ${tWorker} (attemptsMade=${job.attemptsMade}, added=...)`);
-    console.log(`Processing job ${job.id}: ${job.name}`);
+    console.log(`[diag][worker] job ${safeJobIdForLog(job.id)} processing started at ${tWorker} (attemptsMade=${job.attemptsMade}, added=...)`);
+    console.log(`Processing job ${safeJobIdForLog(job.id)}: ${job.name}`);
     if (job.attemptsMade > 0) {
       console.log('Retrying email...');
     }
@@ -25,11 +27,11 @@ const emailWorker = new Worker(
       try {
         const alreadyDelivered = await redisConnection.get(deliveredKey(campaignId, to));
         if (alreadyDelivered) {
-          console.log(`Job ${job.id}: already delivered to ${to}; skipping to avoid duplicate send`);
+          console.log(`Job for campaign ${campaignId} already delivered; skipping to avoid duplicate send`);
           return { success: true, skipped: true };
         }
       } catch (error) {
-        console.error(`Failed to check delivery marker for job ${job.id}:`, error.message);
+        console.error('Failed to check delivery marker for job:', sanitizeErrorMessage(error));
       }
     }
 
@@ -49,13 +51,15 @@ const emailWorker = new Worker(
 
     if (campaignId && to) {
       try {
-        await redisConnection.set(deliveredKey(campaignId, to), '1', 'EX', DELIVERED_TTL_SECONDS);
+        // SET NX keeps the marker first-write-wins: once Brevo accepted the
+        // recipient, a later retry/skip can never overwrite or extend it.
+        await redisConnection.set(deliveredKey(campaignId, to), '1', 'EX', DELIVERED_TTL_SECONDS, 'NX');
       } catch (error) {
-        console.error(`Failed to set delivery marker for job ${job.id}:`, error.message);
+        console.error('Failed to set delivery marker for job:', sanitizeErrorMessage(error));
       }
     }
 
-    console.log(`[diag][worker] sendEmail for job ${job.id} completed, elapsed ${Date.now() - tWorker}ms`);
+    console.log(`[diag][worker] sendEmail for job ${safeJobIdForLog(job.id)} completed, elapsed ${Date.now() - tWorker}ms`);
     console.log('Email sent successfully.');
     return { success: true };
   },
@@ -96,9 +100,10 @@ async function finalizeCampaignStatus(campaignId, totalRecipients, result) {
         data: { status },
       });
       console.log(`Campaign ${campaignId} finalized as ${status} (${sent} sent, ${failed} failed)`);
+      await cleanupCampaignAttachmentFiles(prisma, campaignId);
     }
   } catch (error) {
-    console.error(`Failed to finalize campaign ${campaignId} status:`, error);
+    console.error(`Failed to finalize campaign ${campaignId} status:`, sanitizeErrorMessage(error));
   }
 }
 
@@ -106,7 +111,7 @@ async function processBatchJob(job) {
   const { campaignId, recipients, totalRecipients, sender, subject, text, attachments } = job.data || {};
 
   if (!Array.isArray(recipients) || recipients.length === 0) {
-    throw new Error(`Batch job ${job.id} is missing a recipients array.`);
+    throw new Error(`Batch job ${safeJobIdForLog(job.id)} is missing a recipients array.`);
   }
 
   const pending = [];
@@ -117,7 +122,7 @@ async function processBatchJob(job) {
       try {
         alreadyDelivered = !!(await redisConnection.get(deliveredKey(campaignId, email)));
       } catch (error) {
-        console.error(`Failed to check delivery marker for ${email}:`, error.message);
+        console.error('Failed to check delivery marker:', sanitizeErrorMessage(error));
       }
     }
     if (!alreadyDelivered) {
@@ -126,14 +131,14 @@ async function processBatchJob(job) {
   }
 
   if (pending.length === 0) {
-    console.log(`Batch job ${job.id}: all ${recipients.length} recipients already delivered; skipping send`);
+    console.log(`Batch job ${safeJobIdForLog(job.id)}: all ${recipients.length} recipients already delivered; skipping send`);
     return { success: true, skipped: true, skippedCount: recipients.length };
   }
 
   const provider = getEmailProvider();
   if (provider !== 'brevo') {
     throw new Error(
-      `Batch job ${job.id} requires EMAIL_PROVIDER=brevo, but provider is "${provider}".`
+      `Batch job ${safeJobIdForLog(job.id)} requires EMAIL_PROVIDER=brevo, but provider is "${provider}".`
     );
   }
 
@@ -147,7 +152,7 @@ async function processBatchJob(job) {
   // Marking each pending recipient delivered prevents duplicate sends on retry.
   await markBatchDelivered(campaignId, pending);
 
-  console.log(`Batch job ${job.id}: ${pending.length} recipients accepted by Brevo and marked delivered`);
+  console.log(`Batch job ${safeJobIdForLog(job.id)}: ${pending.length} recipients accepted by Brevo and marked delivered`);
   return { success: true, sentCount: pending.length };
 }
 
@@ -161,7 +166,7 @@ async function markBatchDelivered(campaignId, emails) {
       multi.incr(sentKey(campaignId));
       await multi.exec();
     } catch (error) {
-      console.error(`Failed to set delivery marker / count sent for ${email}:`, error.message);
+      console.error('Failed to set delivery marker / count sent:', sanitizeErrorMessage(error));
     }
   }
 }
@@ -187,6 +192,7 @@ async function finalizeCampaignIfComplete(campaignId, totalRecipients, sent, fai
     data: { status },
   });
   console.log(`Campaign ${campaignId} finalized as ${status} (${sent} sent, ${failed} failed)`);
+  await cleanupCampaignAttachmentFiles(prisma, campaignId);
 }
 
 async function checkCampaignFinalization(campaignId, totalRecipients) {
@@ -195,7 +201,7 @@ async function checkCampaignFinalization(campaignId, totalRecipients) {
     const { sent, failed } = await readCampaignCounters(campaignId);
     await finalizeCampaignIfComplete(campaignId, totalRecipients, sent, failed);
   } catch (error) {
-    console.error(`Failed to finalize campaign ${campaignId} status:`, error);
+    console.error(`Failed to finalize campaign ${campaignId} status:`, sanitizeErrorMessage(error));
   }
 }
 
@@ -211,7 +217,7 @@ async function failBatchRecipients(job) {
       try {
         delivered = !!(await redisConnection.get(deliveredKey(campaignId, email)));
       } catch (error) {
-        console.error(`Failed to check delivery marker for ${email}:`, error.message);
+        console.error('Failed to check delivery marker:', sanitizeErrorMessage(error));
       }
       if (!delivered) {
         unmarked += 1;
@@ -220,12 +226,12 @@ async function failBatchRecipients(job) {
 
     if (unmarked > 0) {
       await redisConnection.incrby(failedKey(campaignId), unmarked);
-      console.log(`Batch job ${job.id}: counted ${unmarked} recipients as failed`);
+      console.log(`Batch job ${safeJobIdForLog(job.id)}: counted ${unmarked} recipients as failed`);
     }
 
     await checkCampaignFinalization(campaignId, totalRecipients);
   } catch (error) {
-    console.error(`Failed to finalize failed batch campaign ${campaignId}:`, error);
+    console.error(`Failed to finalize failed batch campaign ${campaignId}:`, sanitizeErrorMessage(error));
   }
 }
 
@@ -236,7 +242,7 @@ emailWorker.on('ready', () => {
 });
 
 emailWorker.on('completed', async (job, result) => {
-  console.log(`Job ${job.id} completed`);
+  console.log(`Job ${safeJobIdForLog(job.id)} completed`);
   const { campaignId, totalRecipients } = job.data || {};
   if (job.name === 'sendEmailBatch') {
     await checkCampaignFinalization(campaignId, totalRecipients);
@@ -250,11 +256,10 @@ emailWorker.on('completed', async (job, result) => {
 
 emailWorker.on('failed', async (job, err) => {
   console.error('[smtp][job] failed. Error diagnostics:', {
-    message: err && err.message,
+    message: sanitizeErrorMessage(err),
     code: err && err.code,
     responseCode: err && err.responseCode,
     command: err && err.command,
-    response: err && err.response,
   });
   if (job.attemptsMade >= job.opts.attempts) {
     console.error('Email permanently failed.');
@@ -265,7 +270,7 @@ emailWorker.on('failed', async (job, err) => {
       await finalizeCampaignStatus(campaignId, totalRecipients, 'failed');
     }
   } else {
-    console.error(`Job ${job.id} failed, will retry: ${err}`);
+    console.error(`Job ${safeJobIdForLog(job.id)} failed, will retry: ${sanitizeErrorMessage(err)}`);
   }
 });
 

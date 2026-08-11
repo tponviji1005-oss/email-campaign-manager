@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { redisConnection } = require('../config/redis');
 const { getPrisma } = require('../config/prisma');
+const { sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const DELIVERY_STATUS_TTL_SECONDS = 30 * 24 * 60 * 60;
 const TERMINAL_RANK = 30;
@@ -56,13 +57,18 @@ function safeEqual(a, b) {
 }
 
 // Brevo does not provide an HMAC signature scheme. Its documented hardening
-// options are HTTP Basic or Bearer auth on the webhook instance. We support an
-// optional shared secret: when BREVO_WEBHOOK_TOKEN is set, requests must present
-// it via Authorization: Bearer, the x-brevo-token header, or a ?token= query
-// param. When unset, the endpoint stays open (informational) as today.
+// options are HTTP Basic or Bearer auth on the webhook instance. We require a
+// shared secret: requests must present BREVO_WEBHOOK_TOKEN via Authorization:
+// Bearer, the x-brevo-token header, or a ?token= query param. The token itself
+// is enforced at startup by validateEnv, so an unset value here means a
+// misconfigured instance and every request must be rejected (fail closed).
 function ensureAuthorized(ctx) {
   const token = (process.env.BREVO_WEBHOOK_TOKEN || '').trim();
-  if (!token) return;
+  if (!token) {
+    const error = new Error('BREVO_WEBHOOK_TOKEN is not configured.');
+    error.code = 'UNAUTHORIZED_WEBHOOK';
+    throw error;
+  }
 
   const candidates = [ctx && ctx.token, ctx && ctx.brevoToken, ctx && ctx.bearerToken];
   const authorized = candidates.some(
@@ -119,7 +125,7 @@ async function findCampaignIds(prisma, email, campaignId) {
     });
     return (rows || []).map((row) => row.campaignId);
   } catch (error) {
-    console.error('Failed to look up recipients for webhook event:', error.message);
+    console.error('Failed to look up recipients for webhook event:', sanitizeErrorMessage(error));
     return [];
   }
 }
@@ -137,8 +143,8 @@ async function recordDeliveryStatus(campaignId, email, mapping) {
 }
 
 async function handleBrevoWebhookPayload(body, ctx) {
-  const events = normalizeEvents(body);
   ensureAuthorized(ctx);
+  const events = normalizeEvents(body);
 
   const prisma = await getPrisma();
   let processed = 0;
@@ -165,14 +171,14 @@ async function handleBrevoWebhookPayload(body, ctx) {
       try {
         hasSendMarker = !!(await redisConnection.get(sendMarkerKey(campaignId, ev.email)));
       } catch (error) {
-        console.error(`Failed to check send marker for ${ev.email}:`, error.message);
+        console.error('Failed to check send marker:', sanitizeErrorMessage(error));
       }
       if (!hasSendMarker) continue;
 
       try {
         await recordDeliveryStatus(campaignId, ev.email, mapping);
       } catch (error) {
-        console.error(`Failed to record delivery status for ${ev.email}:`, error.message);
+        console.error('Failed to record delivery status:', sanitizeErrorMessage(error));
         continue;
       }
       matched = true;

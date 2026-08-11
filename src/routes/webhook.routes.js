@@ -1,9 +1,10 @@
 const express = require('express');
 const { handleBrevoWebhookPayload } = require('../services/brevo.webhook.service');
+const { webhookLimiter } = require('../middleware/rateLimit');
 
 const router = express.Router();
 
-router.post('/brevo', async (req, res) => {
+router.post('/brevo', webhookLimiter, async (req, res) => {
   try {
     const authorization = req.get('authorization') || '';
     const bearerMatch = /^Bearer\s+(.+)$/i.exec(authorization);
