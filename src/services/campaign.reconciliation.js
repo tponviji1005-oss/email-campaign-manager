@@ -257,8 +257,16 @@ function startCampaignReconciliation() {
     `[reconciliation] started (interval ${intervalMs}ms, stuck timeout ${getReconciliationTimeoutMs()}ms)`
   );
 
-  // Heal already-stuck campaigns without waiting a full interval.
-  runCampaignReconciliation().catch(() => {});
+  // Heal already-stuck campaigns without waiting a full interval. The first
+  // pass can fire from the app.listen callback before the shared Redis
+  // connection has finished handshaking, so when the client is not yet
+  // connected, wait for its "ready" event instead of skipping the pass.
+  const runInitialPass = () => runCampaignReconciliation().catch(() => {});
+  if (redisConnection.status === 'ready' || redisConnection.status === 'connect') {
+    runInitialPass();
+  } else {
+    redisConnection.once('ready', runInitialPass);
+  }
 
   return reconciliationTimer;
 }
