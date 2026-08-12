@@ -274,7 +274,7 @@ async function sendBrevoBatch(options) {
     throw new BrevoApiError('Brevo batch options are required.');
   }
 
-  const { sender, recipients, subject, text, html, attachments, tags, headers } = options;
+  const { sender, recipients, subject, text, html, attachments, tags, headers, onRecipientSent } = options;
 
   if (!Array.isArray(recipients) || recipients.length === 0) {
     throw new BrevoApiError('Brevo batch options.recipients must be a non-empty array.');
@@ -286,15 +286,37 @@ async function sendBrevoBatch(options) {
     throw new BrevoApiError('Brevo batch options.text or options.html is required.');
   }
 
-  const to = recipients.map(normalizeBrevoRecipient);
-  const payload = buildBrevoPayload({ sender, to, subject, text, html, tags, headers });
-
   const brevoAttachments = await toBrevoAttachments(attachments);
-  if (brevoAttachments) {
-    payload.attachment = brevoAttachments;
+
+  // Brevo sends a single email to every address listed in `to`, so one request
+  // with the full recipient list would put every address in the To field of a
+  // single message. Send one request per recipient so each recipient receives
+  // their own email with only their address in `to`.
+  const messageIds = [];
+  for (const recipient of recipients) {
+    const normalized = normalizeBrevoRecipient(recipient);
+    const payload = buildBrevoPayload({
+      sender,
+      to: [normalized],
+      subject,
+      text,
+      html,
+      tags,
+      headers,
+    });
+    if (brevoAttachments) {
+      payload.attachment = brevoAttachments;
+    }
+
+    const result = await sendBrevoApiRequest(payload);
+    messageIds.push(result.messageId);
+
+    if (typeof onRecipientSent === 'function') {
+      await onRecipientSent(normalized.email);
+    }
   }
 
-  return sendBrevoApiRequest(payload);
+  return { success: true, sentCount: messageIds.length, messageIds };
 }
 
 module.exports = {

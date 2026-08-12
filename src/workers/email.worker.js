@@ -144,16 +144,22 @@ async function processBatchJob(job) {
 
   const tSendStart = Date.now();
   console.log(`[diag][worker] sendBrevoBatch START at ${tSendStart} for ${pending.length} recipients`);
-  const result = await sendBrevoBatch({ sender, recipients: pending, subject, text, attachments });
-  console.log(`[diag][worker] sendBrevoBatch DONE at ${Date.now()} (elapsed ${Date.now() - tSendStart}ms) messageId=${result.messageId}`);
+  const result = await sendBrevoBatch({
+    sender,
+    recipients: pending,
+    subject,
+    text,
+    attachments,
+    // Mark each recipient delivered immediately after its own send, so a
+    // failure later in the batch never re-sends to recipients already accepted.
+    onRecipientSent: async (email) => {
+      await markBatchDelivered(campaignId, [email]);
+    },
+  });
+  console.log(`[diag][worker] sendBrevoBatch DONE at ${Date.now()} (elapsed ${Date.now() - tSendStart}ms) sent=${result.sentCount}`);
 
-  // Brevo's 201 response returns a single messageId for the whole request and no
-  // per-recipient detail, so acceptance is confirmed at the batch level only.
-  // Marking each pending recipient delivered prevents duplicate sends on retry.
-  await markBatchDelivered(campaignId, pending);
-
-  console.log(`Batch job ${safeJobIdForLog(job.id)}: ${pending.length} recipients accepted by Brevo and marked delivered`);
-  return { success: true, sentCount: pending.length };
+  console.log(`Batch job ${safeJobIdForLog(job.id)}: ${result.sentCount} recipients each sent their own email and marked delivered`);
+  return { success: true, sentCount: result.sentCount };
 }
 
 async function markBatchDelivered(campaignId, emails) {
