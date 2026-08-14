@@ -6,7 +6,7 @@ A full-stack platform for creating, validating, sending, tracking, and reconcili
 
 Sending bulk email by hand is error-prone: lists contain invalid addresses, synchronous sends block the API, providers rate-limit bursts, and crashes can leave campaigns stuck in flight. This application solves those problems with a complete pipeline — recipient validation before sending, durable queued delivery, throttled background workers, retries with backoff, per-recipient delivery tracking, provider webhooks, and periodic reconciliation of stuck campaigns.
 
-## Features
+## Project Features
 
 - Google OAuth 2.0 authentication with session-based access control
 - Campaign creation with sender, subject, body, recipients, and attachments
