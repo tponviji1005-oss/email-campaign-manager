@@ -49,6 +49,11 @@ export default {
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
+      // Client disconnects during SSR streaming (normal during dev — HMR,
+      // navigation, reload) cause h3 to catch the Node.js abort error and
+      // return a 500 JSON body.  The client is already gone, so skip the
+      // noisy error logging and return the raw response as-is.
+      if (request.signal?.aborted) return response;
       return await normalizeCatastrophicSsrResponse(response);
     } catch (error) {
       console.error(error);
