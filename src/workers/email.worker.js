@@ -1,7 +1,7 @@
 const { Worker } = require('bullmq');
 const { redisConnection } = require('../config/redis');
 const { sendEmail, sendBrevoEmail, sendBrevoBatch } = require('../services/email.service');
-const { getEmailProvider } = require('../config/brevo');
+const { getEmailProvider, getBrevoConfig } = require('../config/brevo');
 const { getPrisma } = require('../config/prisma');
 const { cleanupCampaignAttachmentFiles } = require('../config/uploads');
 const { safeJobIdForLog, sanitizeErrorMessage } = require('../utils/logSanitizer');
@@ -38,8 +38,12 @@ const emailWorker = new Worker(
     const provider = getEmailProvider();
     if (provider === 'brevo') {
       const { senderName, subject, text, attachments } = job.data || {};
+      const brevoConfig = getBrevoConfig();
       await sendBrevoEmail({
-        sender: senderName ? { name: senderName } : undefined,
+        sender: {
+          name: senderName || brevoConfig.senderName,
+          email: brevoConfig.senderEmail,
+        },
         to,
         subject,
         text,
@@ -167,10 +171,19 @@ async function markBatchDelivered(campaignId, emails) {
   for (const email of emails) {
     if (!email) continue;
     try {
-      const multi = redisConnection.multi();
-      multi.set(deliveredKey(campaignId, email), '1', 'EX', DELIVERED_TTL_SECONDS);
-      multi.incr(sentKey(campaignId));
-      await multi.exec();
+      // SET NX ensures the marker is only created once. If it already exists
+      // (from a previous delivery attempt or retry), the incr is skipped so
+      // the sent counter is never double-counted.
+      const wasNew = await redisConnection.set(
+        deliveredKey(campaignId, email),
+        '1',
+        'EX',
+        DELIVERED_TTL_SECONDS,
+        'NX',
+      );
+      if (wasNew === 'OK') {
+        await redisConnection.incr(sentKey(campaignId));
+      }
     } catch (error) {
       console.error('Failed to set delivery marker / count sent:', sanitizeErrorMessage(error));
     }

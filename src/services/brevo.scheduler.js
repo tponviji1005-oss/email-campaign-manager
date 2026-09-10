@@ -7,6 +7,9 @@ const BATCH_JOB_OPTS = {
   backoff: { type: 'exponential', delay: 5000 },
   removeOnComplete: true,
   removeOnFail: { age: 7 * 24 * 60 * 60 },
+  // 300 recipients at ~500ms each ≈ 150s worst case. Default 30s lock
+  // causes premature stalling and duplicate sends.
+  lockDuration: 5 * 60 * 1000,
 };
 
 function splitIntoChunks(recipients, chunkSize) {

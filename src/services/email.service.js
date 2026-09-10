@@ -269,6 +269,11 @@ async function sendBrevoEmail(options) {
   return sendBrevoApiRequest(payload);
 }
 
+// Number of concurrent Brevo API calls within a single batch job.
+// 5 keeps well under Brevo rate limits while being ~5× faster than
+// fully sequential sending (300 recipients: ~30s vs ~150s).
+const BREVO_BATCH_CONCURRENCY = 5;
+
 async function sendBrevoBatch(options) {
   if (!options || typeof options !== 'object') {
     throw new BrevoApiError('Brevo batch options are required.');
@@ -292,28 +297,40 @@ async function sendBrevoBatch(options) {
   // with the full recipient list would put every address in the To field of a
   // single message. Send one request per recipient so each recipient receives
   // their own email with only their address in `to`.
+  //
+  // Process in chunks of BREVO_BATCH_CONCURRENCY to stay under Brevo rate
+  // limits while avoiding the ~150s wall-clock of fully sequential sends.
+  // If ANY recipient in a chunk fails the entire batch throws so BullMQ can
+  // retry — already-delivered recipients are filtered on the next attempt.
   const messageIds = [];
-  for (const recipient of recipients) {
-    const normalized = normalizeBrevoRecipient(recipient);
-    const payload = buildBrevoPayload({
-      sender,
-      to: [normalized],
-      subject,
-      text,
-      html,
-      tags,
-      headers,
-    });
-    if (brevoAttachments) {
-      payload.attachment = brevoAttachments;
-    }
+  for (let i = 0; i < recipients.length; i += BREVO_BATCH_CONCURRENCY) {
+    const chunk = recipients.slice(i, i + BREVO_BATCH_CONCURRENCY);
+    const chunkResults = await Promise.all(
+      chunk.map(async (recipient) => {
+        const normalized = normalizeBrevoRecipient(recipient);
+        const payload = buildBrevoPayload({
+          sender,
+          to: [normalized],
+          subject,
+          text,
+          html,
+          tags,
+          headers,
+        });
+        if (brevoAttachments) {
+          payload.attachment = brevoAttachments;
+        }
 
-    const result = await sendBrevoApiRequest(payload);
-    messageIds.push(result.messageId);
+        const result = await sendBrevoApiRequest(payload);
 
-    if (typeof onRecipientSent === 'function') {
-      await onRecipientSent(normalized.email);
-    }
+        if (typeof onRecipientSent === 'function') {
+          await onRecipientSent(normalized.email);
+        }
+
+        return result.messageId;
+      })
+    );
+    messageIds.push(...chunkResults);
   }
 
   return { success: true, sentCount: messageIds.length, messageIds };

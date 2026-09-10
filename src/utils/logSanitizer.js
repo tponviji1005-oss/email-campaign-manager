@@ -52,6 +52,9 @@ function sanitizeErrorMessage(error, fallback) {
   if (/EAUTH/i.test(code)) {
     return 'SMTP authentication failed';
   }
+  if (status === 401 || /^unauthorized$/i.test(code) || /^HTTP_401$/.test(code)) {
+    return 'Email provider authentication failed — verify API key and sender configuration';
+  }
   if (/ATTACHMENT_READ_ERROR/i.test(code)) {
     return 'Attachment read failed';
   }

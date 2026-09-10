@@ -66,7 +66,7 @@ function getBrevoConfig() {
   }
 
   return {
-    apiKey: process.env.BREVO_API_KEY,
+    apiKey: (process.env.BREVO_API_KEY || '').trim(),
     senderEmail: (process.env.BREVO_SENDER_EMAIL || '').trim(),
     senderName: (process.env.BREVO_SENDER_NAME || '').trim() || DEFAULT_BREVO_SENDER_NAME,
     baseUrl: BREVO_API_BASE_URL,
