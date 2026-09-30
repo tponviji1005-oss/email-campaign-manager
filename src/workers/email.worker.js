@@ -4,7 +4,8 @@ const { sendEmail, sendBrevoEmail, sendBrevoBatch } = require('../services/email
 const { getEmailProvider, getBrevoConfig } = require('../config/brevo');
 const { getPrisma } = require('../config/prisma');
 const { cleanupCampaignAttachmentFiles } = require('../config/uploads');
-const { safeJobIdForLog, sanitizeErrorMessage } = require('../utils/logSanitizer');
+const { safeJobIdForLog, sanitizeErrorMessage, redactEmail } = require('../utils/logSanitizer');
+const { setRecipientStatus } = require('../utils/recipientStatus');
 
 const emailWorker = new Worker(
   'emailQueue',
@@ -40,6 +41,7 @@ const emailWorker = new Worker(
       const { senderName, subject, text, attachments } = job.data || {};
       const brevoConfig = getBrevoConfig();
       await sendBrevoEmail({
+        campaignId,
         sender: {
           name: senderName || brevoConfig.senderName,
           email: brevoConfig.senderEmail,
@@ -50,7 +52,7 @@ const emailWorker = new Worker(
         attachments,
       });
     } else {
-      await sendEmail(job.data);
+      await sendEmail({ ...job.data });
     }
 
     if (campaignId && to) {
@@ -61,6 +63,9 @@ const emailWorker = new Worker(
       } catch (error) {
         console.error('Failed to set delivery marker for job:', sanitizeErrorMessage(error));
       }
+      // Provider accepted the send — persist it (best-effort; never blocks the
+      // Redis finalization counters above).
+      await markRecipientStatus(campaignId, to, 'SENT');
     }
 
     console.log(`[diag][worker] sendEmail for job ${safeJobIdForLog(job.id)} completed, elapsed ${Date.now() - tWorker}ms`);
@@ -81,6 +86,25 @@ const sentKey = (campaignId) => `campaign:${campaignId}:sent`;
 const failedKey = (campaignId) => `campaign:${campaignId}:failed`;
 const deliveredKey = (campaignId, email) => `campaign:${campaignId}:delivered:${String(email).toLowerCase()}`;
 const DELIVERED_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+// Persistent per-recipient status. The shared helper is rank-guarded, so a
+// worker SENT (rank 10) can never overwrite a provider terminal outcome
+// (DELIVERED/BOUNCED/... rank 30) recorded by the webhook path.
+async function markRecipientStatus(campaignId, email, status) {
+  if (!campaignId || !email) return;
+  try {
+    const prisma = await getPrisma();
+    const result = await setRecipientStatus(prisma, campaignId, email, status);
+    if (result === 'not-found') {
+      console.error(`Recipient row not found for campaign ${campaignId} (${redactEmail(email)}); status ${status} not persisted`);
+    }
+  } catch (error) {
+    console.error(
+      `Failed to persist recipient status ${status} for campaign ${campaignId}:`,
+      sanitizeErrorMessage(error)
+    );
+  }
+}
 
 async function finalizeCampaignStatus(campaignId, totalRecipients, result) {
   if (!campaignId) return;
@@ -149,6 +173,7 @@ async function processBatchJob(job) {
   const tSendStart = Date.now();
   console.log(`[diag][worker] sendBrevoBatch START at ${tSendStart} for ${pending.length} recipients`);
   const result = await sendBrevoBatch({
+    campaignId,
     sender,
     recipients: pending,
     subject,
@@ -158,6 +183,7 @@ async function processBatchJob(job) {
     // failure later in the batch never re-sends to recipients already accepted.
     onRecipientSent: async (email) => {
       await markBatchDelivered(campaignId, [email]);
+      await markRecipientStatus(campaignId, email, 'SENT');
     },
   });
   console.log(`[diag][worker] sendBrevoBatch DONE at ${Date.now()} (elapsed ${Date.now() - tSendStart}ms) sent=${result.sentCount}`);
@@ -246,6 +272,20 @@ async function failBatchRecipients(job) {
     if (unmarked > 0) {
       await redisConnection.incrby(failedKey(campaignId), unmarked);
       console.log(`Batch job ${safeJobIdForLog(job.id)}: counted ${unmarked} recipients as failed`);
+      // Persist the terminal per-recipient failure for the rows that never got
+      // a delivery marker (already-delivered recipients keep their SENT).
+      for (const email of recipients) {
+        if (!email) continue;
+        let delivered = false;
+        try {
+          delivered = !!(await redisConnection.get(deliveredKey(campaignId, email)));
+        } catch (error) {
+          console.error('Failed to check delivery marker:', sanitizeErrorMessage(error));
+        }
+        if (!delivered) {
+          await markRecipientStatus(campaignId, email, 'FAILED');
+        }
+      }
     }
 
     await checkCampaignFinalization(campaignId, totalRecipients);
@@ -282,11 +322,13 @@ emailWorker.on('failed', async (job, err) => {
   });
   if (job.attemptsMade >= job.opts.attempts) {
     console.error('Email permanently failed.');
-    const { campaignId, totalRecipients } = job.data || {};
+    const { campaignId, to, totalRecipients } = job.data || {};
     if (job.name === 'sendEmailBatch') {
       await failBatchRecipients(job);
     } else {
       await finalizeCampaignStatus(campaignId, totalRecipients, 'failed');
+      // All retries exhausted — persist the terminal per-recipient failure.
+      await markRecipientStatus(campaignId, to, 'FAILED');
     }
   } else {
     console.error(`Job ${safeJobIdForLog(job.id)} failed, will retry: ${sanitizeErrorMessage(err)}`);

@@ -4,9 +4,47 @@ const nodemailer = require('nodemailer');
 const { getTransporterConfig } = require('../config/mail');
 const { getBrevoConfig, isBrevoConfigured, BREVO_API_BASE_URL, BREVO_TRANSACTIONAL_EMAIL_ENDPOINT } = require('../config/brevo');
 const { redactEmail, sanitizeErrorMessage } = require('../utils/logSanitizer');
+const {
+  buildUnsubscribePageUrl,
+  buildOneClickUnsubscribeUrl,
+} = require('../utils/unsubscribe');
 
 const BREVO_API_URL = `${BREVO_API_BASE_URL}${BREVO_TRANSACTIONAL_EMAIL_ENDPOINT}`;
-const BREVO_REQUEST_TIMEOUT_MS = 30000;
+const BREVO_REQUEST_TIMEOUT_MS = 30_000;
+
+// Public origins used in per-recipient unsubscribe links. FRONTEND_URL hosts
+// the unsubscribe page; the API origin hosts the RFC 8058 one-click endpoint
+// (defaults to the local backend; set PUBLIC_BACKEND_URL in deployment).
+const FRONTEND_PUBLIC_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+const BACKEND_PUBLIC_URL = (process.env.PUBLIC_BACKEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+const UNSUBSCRIBE_MARKER = '/unsubscribe?';
+
+// Campaign emails carry a per-recipient signed unsubscribe footer and the
+// List-Unsubscribe headers bulk senders are required to honor. Applied only
+// when the caller actually has campaign context; the marker check keeps the
+// footer from ever being appended twice across retries/re-entry.
+function withCampaignUnsubscribe(options, recipientEmail) {
+  const campaignId = options && options.campaignId;
+  if (typeof campaignId !== 'string' || !campaignId.trim() || !recipientEmail) {
+    return options;
+  }
+
+  const pageUrl = buildUnsubscribePageUrl(FRONTEND_PUBLIC_URL, campaignId, recipientEmail);
+  const oneClickUrl = buildOneClickUnsubscribeUrl(BACKEND_PUBLIC_URL, campaignId, recipientEmail);
+
+  let text = options.text;
+  if (typeof text === 'string' && !text.includes(UNSUBSCRIBE_MARKER)) {
+    text = `${text}\n\n——————————————————\nDon't want these emails? Unsubscribe: ${pageUrl}`;
+  }
+
+  const headers = {
+    ...(options.headers || {}),
+    'List-Unsubscribe': `<${oneClickUrl}>`,
+    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+  };
+
+  return { ...options, text, headers };
+}
 
 class BrevoApiError extends Error {
   constructor(message, options) {
@@ -54,6 +92,7 @@ async function sendEmail(options) {
   }
 
   const transporter = createTransporter();
+  const prepared = withCampaignUnsubscribe(options, typeof to === 'string' ? to : '');
 
   const tSendStart = Date.now();
   console.log(`[diag][sendmail] sendMail START at ${tSendStart}`);
@@ -62,8 +101,9 @@ async function sendEmail(options) {
       from,
       to,
       subject,
-      text,
-      html,
+      text: prepared.text,
+      html: prepared.html,
+      headers: prepared.headers,
       attachments,
     });
   } catch (error) {
@@ -259,7 +299,16 @@ async function sendBrevoEmail(options) {
   }
 
   const recipient = normalizeBrevoRecipient(to);
-  const payload = buildBrevoPayload({ sender, to: [recipient], subject, text, html, tags, headers });
+  const prepared = withCampaignUnsubscribe(options, recipient.email);
+  const payload = buildBrevoPayload({
+    sender,
+    to: [recipient],
+    subject,
+    text: prepared.text,
+    html: prepared.html,
+    tags,
+    headers: prepared.headers,
+  });
 
   const brevoAttachments = await toBrevoAttachments(attachments);
   if (brevoAttachments) {
@@ -308,14 +357,17 @@ async function sendBrevoBatch(options) {
     const chunkResults = await Promise.all(
       chunk.map(async (recipient) => {
         const normalized = normalizeBrevoRecipient(recipient);
+        // Per-recipient: the footer URL and headers embed a signature bound to
+        // this exact (campaignId, email) pair.
+        const prepared = withCampaignUnsubscribe(options, normalized.email);
         const payload = buildBrevoPayload({
           sender,
           to: [normalized],
           subject,
-          text,
-          html,
+          text: prepared.text,
+          html: prepared.html,
           tags,
-          headers,
+          headers: prepared.headers,
         });
         if (brevoAttachments) {
           payload.attachment = brevoAttachments;

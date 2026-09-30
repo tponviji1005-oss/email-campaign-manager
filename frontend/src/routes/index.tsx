@@ -52,10 +52,10 @@ function DashboardPage() {
         initial={{ opacity: 0, y: 16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.45, ease: "easeOut" }}
-        className="relative overflow-hidden rounded-3xl border border-border bg-accent/60 p-6 shadow-[var(--shadow-soft)] sm:p-10"
+        className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-primary/[0.04] via-card to-card p-6 shadow-[var(--shadow-soft)] sm:p-10"
       >
-        <div className="grid items-center gap-8 lg:grid-cols-[1.05fr_1fr]">
-          <div className="min-w-0">
+        <div className="grid items-center gap-10 lg:grid-cols-[1.05fr_1fr] lg:gap-14">
+          <div className="min-w-0 text-center lg:text-left">
             <span className="inline-flex items-center gap-2 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-primary">
               <Megaphone className="size-3.5" /> Campaign platform
             </span>
@@ -65,7 +65,7 @@ function DashboardPage() {
             <p className="mt-3 max-w-xl text-sm text-muted-foreground sm:text-base">
               Create, validate and send bulk email campaigns securely.
             </p>
-            <div className="mt-6 flex flex-wrap gap-3">
+            <div className="mt-6 flex flex-wrap justify-center gap-3 lg:justify-start">
               <Button asChild size="lg" className="rounded-full px-6">
                 <Link to="/create">
                   Create Campaign <ArrowRight className="ml-1 size-4" />
@@ -76,13 +76,15 @@ function DashboardPage() {
               </Button>
             </div>
           </div>
-          <img
-            src={heroImage}
-            alt="Illustration of email campaign delivery status panels"
-            width={1024}
-            height={896}
-            className="mx-auto w-full max-w-lg"
-          />
+          <div className="rounded-2xl border border-border/70 bg-card/80 p-4 shadow-[var(--shadow-soft)] sm:p-6">
+            <img
+              src={heroImage}
+              alt="Illustration of email campaign delivery status panels"
+              width={1024}
+              height={896}
+              className="mx-auto w-full max-w-lg"
+            />
+          </div>
         </div>
       </motion.section>
 

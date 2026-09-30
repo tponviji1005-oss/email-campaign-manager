@@ -117,7 +117,10 @@ export const api = {
     form.append("body", payload.body);
     form.append("recipients", JSON.stringify(payload.recipients));
     payload.attachments.forEach((file) => form.append("attachments", file));
-    return request<{ id: string }>("/campaigns", { method: "POST", body: form });
+    return request<{ id: string; acceptedCount?: number; suppressedCount?: number }>("/campaigns", {
+      method: "POST",
+      body: form,
+    });
   },
 
   listCampaigns: (params: { page: number; pageSize: number; search?: string | undefined }) => {

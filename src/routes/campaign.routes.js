@@ -197,6 +197,29 @@ router.post(
         });
       }
 
+      // Suppression filtering: one indexed query for this user's suppressed
+      // addresses, applied AFTER validation and BEFORE anything is queued.
+      // Only the authenticated user's own suppressions can ever match.
+      const suppressedRows = await prisma.suppression.findMany({
+        where: { userId: req.user.id, email: { in: recipientList } },
+        select: { email: true, reason: true },
+      });
+      const suppressionReasonByEmail = new Map(
+        suppressedRows.map((row) => [row.email, row.reason])
+      );
+      const deliverableRecipients = recipientList.filter(
+        (email) => !suppressionReasonByEmail.has(email)
+      );
+      const suppressedCount = recipientList.length - deliverableRecipients.length;
+
+      if (deliverableRecipients.length === 0) {
+        await removeSavedFiles(req);
+        return res.status(400).json({
+          success: false,
+          message: `All ${suppressedCount} validated recipients are suppressed (unsubscribed or previously bounced); no campaign was created`,
+        });
+      }
+
       const attachmentFiles = (req.files && req.files.attachments) || [];
 
       // Create the campaign and its recipients atomically so invalid input can
@@ -221,11 +244,18 @@ router.post(
         });
 
         await tx.recipient.createMany({
-          data: recipientList.map((email) => ({
-            campaignId: created.id,
-            email,
-            isValid: true,
-          })),
+          // Every validated address keeps a row (nothing silently removed);
+          // suppressed ones are stored with an explanatory status instead of
+          // being queued.
+          data: recipientList.map((email) => {
+            const reason = suppressionReasonByEmail.get(email);
+            return {
+              campaignId: created.id,
+              email,
+              isValid: true,
+              ...(reason ? { status: 'BLOCKED', suppressReason: reason } : { status: 'PENDING' }),
+            };
+          }),
         });
 
         return created;
@@ -234,7 +264,10 @@ router.post(
       const from = buildFrom(senderName.trim());
       const attachmentDescriptors = attachmentsForJobs(attachmentFiles);
 
-      console.log(`[campaign] created campaign ${campaign.id} for ${recipientList.length} recipients`);
+      console.log(
+        `[campaign] created campaign ${campaign.id} for ${deliverableRecipients.length} recipients` +
+          (suppressedCount > 0 ? ` (${suppressedCount} suppressed)` : '')
+      );
 
       const provider = getEmailProvider();
       const isBrevo = provider === 'brevo';
@@ -242,7 +275,7 @@ router.post(
       if (isBrevo && attachmentDescriptors.length === 0) {
         await scheduleBrevoCampaign({
           campaignId: campaign.id,
-          recipients: recipientList,
+          recipients: deliverableRecipients,
           subject: subject.trim(),
           text: body,
           sender: { name: senderName.trim() },
@@ -250,7 +283,7 @@ router.post(
       } else {
         const dailyLimit = isBrevo ? getDailyEmailLimit() : 0;
         await emailQueue.addBulk(
-          recipientList.map((email, index) => ({
+          deliverableRecipients.map((email, index) => ({
             name: 'sendEmail',
             data: {
               from,
@@ -260,7 +293,9 @@ router.post(
               text: body,
               ...(attachmentDescriptors.length > 0 ? { attachments: attachmentDescriptors } : {}),
               campaignId: campaign.id,
-              totalRecipients: recipientList.length,
+              // Finalization denominator counts only queued recipients so a
+              // suppressed address can never stall campaign completion.
+              totalRecipients: deliverableRecipients.length,
             },
             opts: {
               jobId: recipientJobId(campaign.id, email),
@@ -274,13 +309,20 @@ router.post(
         );
       }
 
-      console.log(`[campaign] campaign ${campaign.id} fully queued for ${recipientList.length} recipients`);
+      console.log(
+        `[campaign] campaign ${campaign.id} fully queued for ${deliverableRecipients.length} recipients`
+      );
 
       return res.status(201).json({
         success: true,
         id: campaign.id,
         status: campaign.status,
-        message: `Campaign created and queued for ${recipientList.length} recipients`,
+        acceptedCount: deliverableRecipients.length,
+        suppressedCount,
+        message:
+          suppressedCount > 0
+            ? `Campaign created and queued for ${deliverableRecipients.length} recipients; ${suppressedCount} suppressed recipients were excluded`
+            : `Campaign created and queued for ${deliverableRecipients.length} recipients`,
       });
     } catch (error) {
       console.error('Failed to create campaign:', sanitizeErrorMessage(error));
