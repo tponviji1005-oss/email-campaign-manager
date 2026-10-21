@@ -113,6 +113,9 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env`.
 | `BREVO_API_KEY` / `BREVO_SENDER_EMAIL` / `BREVO_SENDER_NAME` | Brevo provider config |
 | `BREVO_WEBHOOK_TOKEN` | Shared secret for `/webhooks/brevo` |
 | `EMAIL_PROVIDER` | `brevo` or `gmail`/`smtp` |
+| `BREVO_SIMULATED_SEND` | `true` to run safe local tests without sending real emails |
+| `BACKEND_URL` | Backend origin for generating RFC 8058 unsubscribe links |
+| `UNSUBSCRIBE_SECRET` | Secret salt for HMAC-SHA256 unsubscribe tokens |
 | `VITE_API_BASE_URL` (frontend) | Backend API origin |
 
 ## Security & Reliability
@@ -128,21 +131,38 @@ Copy `.env.example` to `.env` and fill in real values. Never commit `.env`.
 - Bounded retries (3 attempts, exponential backoff) and delivery markers to prevent duplicate sends
 - Graceful shutdown of HTTP, worker, queue, SMTP, Prisma, and Redis
 - Evidence-based reconciliation of stuck campaigns with Redis locks
+- RFC 8058 compliant one-click unsubscribe links and pre-flight suppression filtering
 
-## Testing
+## Testing & 300-Recipient Simulation
 
-The repository contains no automated test suite. The following checks were performed manually during development against the live application (real PostgreSQL, Redis, Google OAuth, and email provider):
+The repository includes a comprehensive automated test suite built on the native Node.js test runner (`node:test`).
 
-- OAuth state validation (missing/mismatched/reused state rejected)
-- SMTP environment validation
-- Redis/session isolation under failure
-- Reliability checks: retry/backoff, duplicate-send prevention, finalization
-- Graceful shutdown suite
-- Prisma schema validation (`npx prisma validate`)
-- Backend syntax checks (`node --check`)
-- Frontend TypeScript check (`npx tsc --noEmit`)
-- Frontend production build (`npm run build`)
-- End-to-end real email smoke test (campaign delivered and finalized `SENT`)
+Run all automated tests:
+```sh
+npm test
+```
+
+### Safe 300-Recipient Simulation (Zero Real Emails)
+
+You can test full campaign workflows up to 300 recipients without risking accidental email delivery or incurring provider API quota consumption:
+
+1. In `.env`, set:
+   ```sh
+   BREVO_SIMULATED_SEND="true"
+   ```
+2. When `BREVO_SIMULATED_SEND="true"` is enabled:
+   - All external HTTP calls to Brevo are bypassed.
+   - The email service returns simulated response IDs (`<sim-...@brevo-sim.local>`).
+   - Synthetic error conditions (e.g. addresses containing `fail` or `invalid`) simulate permanent provider rejections without crashing the batch.
+   - It cannot send real emails, even if real API keys or recipient addresses are present.
+
+The test suite automatically tests:
+- 300 synthetic recipients parsed and dispatched through batch scheduling.
+- Case-insensitive duplicate detection and syntax validation.
+- Non-retryable 4xx error classification vs. retryable 429/5xx rate limits and backoff.
+- Redis Lua atomic ranking and timing-safe webhook token authentication.
+- Cryptographic HMAC-SHA256 unsubscribe token generation and verification.
+- Campaign finalization invariants (`SENT`, `PARTIAL`, `FAILED`).
 
 ## Production Deployment
 
@@ -150,30 +170,37 @@ Hosting, domain, DNS, and provider configuration are deployment-specific. A prod
 
 - Production PostgreSQL and Redis instances
 - Production environment variables (`NODE_ENV=production`, real secrets, explicit origins)
-- `npx prisma generate` and `npx prisma migrate deploy` (create the initial migration first — none are committed)
+- `npx prisma generate` and `npx prisma migrate deploy`
 - Google OAuth production callback URL registered (HTTPS required)
 - HTTPS/TLS termination behind a reverse proxy
-- Brevo sender/domain verified and SPF/DKIM/DMARC DNS records published
+- Authenticated custom domain with SPF/DKIM/DMARC DNS records in Brevo
 - Frontend built (`npm run build`) and deployed separately
 
-## Email Deliverability
+## Email Deliverability & Domain Authentication
 
-Successful API delivery does not guarantee inbox placement. Production should use a verified sending domain with SPF, DKIM, and DMARC records, maintain a good sender reputation, and follow responsible sending practices — validating lists, controlling volume, and avoiding spammy content.
+Successful API delivery (`200 OK` from Brevo) **does not guarantee inbox placement**.
+
+### Limitations of Free Gmail Senders:
+- Configuring a personal `@gmail.com` address as `BREVO_SENDER_EMAIL` is suitable only for development, staging, or sending to your own test inbox.
+- Google publishes a strict DMARC policy (`p=reject`) for `gmail.com`. When bulk or transactional emails with `From: user@gmail.com` originate from third-party IP addresses (such as Brevo or AWS SES), receiving mail servers (Gmail, Outlook, institutional/university filters) are likely to reject the email or route it directly to Spam.
+
+### Requirements for High Deliverability:
+To ensure legitimate campaign emails land in inboxes (especially for institutional or college addresses):
+1. **Custom Domain:** Use a dedicated domain you own (e.g. `mail.yourdomain.com`).
+2. **SPF (Sender Policy Framework):** Add Brevo's SPF include record to your domain's DNS TXT records (`include:spf.brevo.com`).
+3. **DKIM (DomainKeys Identified Mail):** Generate a 2048-bit DKIM key in Brevo and publish the public key in your domain's DNS TXT records.
+4. **DMARC:** Publish a DMARC policy (e.g. `v=DMARC1; p=none; rua=mailto:dmarc@yourdomain.com`) aligning SPF and DKIM.
+5. **List Hygiene:** Respect unsubscribed recipients and suppress bounced addresses immediately (handled automatically by our webhook service).
 
 ## Future Improvements
 
-Not currently implemented:
+Features planned for future iterations:
 
-- Campaign scheduling
-- Richer analytics
-- Email templates
-- Unsubscribe management
-- Advanced recipient segmentation
+- Campaign scheduling (send at a specific future timestamp)
+- Rich visual analytics and open/click tracking dashboards
+- Recipient tags and advanced audience segmentation
 
 ## License
 
 ISC.
 
-## Final Notes
-
-The application is production-ready from the application-code side: authentication, queueing, delivery, webhooks, reconciliation, and graceful shutdown are all implemented and verified. Production infrastructure, domain, DNS, secrets, and provider configuration must still be completed during deployment.
