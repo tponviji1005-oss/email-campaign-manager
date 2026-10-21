@@ -15,6 +15,7 @@ const campaignRoutes = require('./routes/campaign.routes');
 const emailRoutes = require('./routes/email.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const webhookRoutes = require('./routes/webhook.routes');
+const unsubscribeRoutes = require('./routes/unsubscribe.routes');
 
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || FRONTEND_URL;
@@ -87,6 +88,7 @@ app.use('/campaigns', campaignRoutes);
 app.use('/email', emailRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/webhooks', webhookRoutes);
+app.use('/api', unsubscribeRoutes);
 
 // 404 for unknown routes: a consistent JSON body instead of Express's default
 // HTML "Cannot GET /..." page, so a missing route can never leak internals.

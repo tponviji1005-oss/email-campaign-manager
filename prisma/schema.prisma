@@ -22,6 +22,27 @@ enum CampaignStatus {
   FAILED
 }
 
+enum SuppressionReason {
+  UNSUBSCRIBED
+  HARD_BOUNCE
+  SPAM
+  BLOCKED
+  INVALID
+}
+
+enum DeliveryStatus {
+  PENDING
+  QUEUED
+  SENT
+  DELIVERED
+  SOFT_BOUNCED
+  BOUNCED
+  BLOCKED
+  SPAM
+  INVALID
+  FAILED
+}
+
 model User {
   id        String     @id @default(uuid())
   googleId  String     @unique
@@ -31,7 +52,8 @@ model User {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
-  campaigns Campaign[]
+  campaigns   Campaign[]
+  suppressions Suppression[]
 
   @@index([email])
 }
@@ -56,11 +78,13 @@ model Campaign {
 }
 
 model Recipient {
-  id         String   @id @default(uuid())
-  campaignId String
-  email      String
-  isValid    Boolean  @default(false)
-  createdAt  DateTime @default(now())
+  id            String         @id @default(uuid())
+  campaignId    String
+  email         String
+  isValid       Boolean        @default(false)
+  status        DeliveryStatus @default(PENDING)
+  suppressReason String?
+  createdAt     DateTime       @default(now())
 
   campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
 
@@ -95,4 +119,18 @@ model CampaignHistory {
 
   @@index([campaignId])
   @@index([sentAt])
+}
+
+model Suppression {
+  id        String            @id @default(uuid())
+  userId    String
+  email     String
+  reason    SuppressionReason
+  source    String?
+  createdAt DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, email])
+  @@index([userId])
 }

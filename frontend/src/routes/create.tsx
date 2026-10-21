@@ -255,7 +255,7 @@ function CreateCampaignPage() {
     if (!parsed || !canSend) return;
     setSending(true);
     try {
-      await api.sendCampaign({
+      const result = await api.sendCampaign({
         senderName,
         subject,
         body,
@@ -264,6 +264,11 @@ function CreateCampaignPage() {
       });
       setConfirmOpen(false);
       clearForm();
+      if (result.suppressedCount && result.suppressedCount > 0) {
+        toast.warning(
+          `${result.suppressedCount} ${result.suppressedCount === 1 ? "recipient was" : "recipients were"} excluded because they are unsubscribed or suppressed.`
+        );
+      }
       toast.success("Campaign sent successfully");
       navigate({ to: "/history" });
     } catch (err) {
