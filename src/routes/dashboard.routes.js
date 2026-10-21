@@ -14,7 +14,12 @@ router.get('/stats', requireAuth, async (req, res) => {
       prisma.campaign.count({ where: { userId } }),
       prisma.campaign.groupBy({ by: ['status'], where: { userId }, _count: { _all: true } }),
       prisma.recipient.count({ where: { campaign: { userId }, isValid: true } }),
-      prisma.recipient.count({ where: { campaign: { userId, status: 'SENT' } } }),
+      prisma.recipient.count({
+        where: {
+          campaign: { userId },
+          status: { in: ['SENT', 'DELIVERED'] },
+        },
+      }),
     ]);
 
     const statusCounts = Object.fromEntries(statusGroups.map((group) => [group.status, group._count._all]));

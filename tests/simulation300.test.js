@@ -84,8 +84,9 @@ describe('Safe 300-Recipient Campaign Simulation (Zero-Email Mock)', () => {
     assert.strictEqual(result.sentCount, 8);
     assert.strictEqual(result.failedCount, 2);
     assert.strictEqual(failed.length, 2);
-    assert.strictEqual(failed[0].email, 'fail_recipient_1@example.test');
-    assert.strictEqual(failed[1].email, 'invalid_recipient_2@example.test');
+    const failedEmails = failed.map((f) => f.email);
+    assert.ok(failedEmails.includes('fail_recipient_1@example.test'));
+    assert.ok(failedEmails.includes('invalid_recipient_2@example.test'));
   });
 
   test('Simulation: Duplicate job prevention & idempotency', () => {

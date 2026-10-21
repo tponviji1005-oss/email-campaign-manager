@@ -34,7 +34,12 @@ router.get('/auth/google/callback', (req, res, next) => {
         if (loginErr) {
           return res.status(500).json({ success: false, message: 'Login failed' });
         }
-        return res.redirect(FRONTEND_URL);
+        req.session.save((saveErr) => {
+          if (saveErr) {
+            return res.status(500).json({ success: false, message: 'Login failed' });
+          }
+          return res.redirect(FRONTEND_URL);
+        });
       });
     });
   })(req, res, next);

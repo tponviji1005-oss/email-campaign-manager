@@ -9,7 +9,7 @@ const RAW_BASE_URL = (import.meta.env["VITE_API_BASE_URL"] as string | undefined
 export const API_BASE_URL: string = RAW_BASE_URL?.replace(/\/$/, "") ?? "";
 export const API_CONFIGURED = Boolean(API_BASE_URL);
 
-export type CampaignStatus = "DRAFT" | "SENDING" | "SENT" | "FAILED";
+export type CampaignStatus = "DRAFT" | "SENDING" | "SENT" | "PARTIAL" | "FAILED";
 
 export interface DashboardStats {
   totalCampaigns: number;
@@ -117,10 +117,7 @@ export const api = {
     form.append("body", payload.body);
     form.append("recipients", JSON.stringify(payload.recipients));
     payload.attachments.forEach((file) => form.append("attachments", file));
-    return request<{ id: string; acceptedCount?: number; suppressedCount?: number }>("/campaigns", {
-      method: "POST",
-      body: form,
-    });
+    return request<{ id: string }>("/campaigns", { method: "POST", body: form });
   },
 
   listCampaigns: (params: { page: number; pageSize: number; search?: string | undefined }) => {

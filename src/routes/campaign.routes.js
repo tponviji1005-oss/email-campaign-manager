@@ -11,6 +11,8 @@ const { requireAuth } = require('../middleware/requireAuth');
 const { campaignCreateLimiter, parseRecipientsLimiter } = require('../middleware/rateLimit');
 const { asyncHandler } = require('../middleware/asyncHandler');
 const { sanitizeErrorMessage } = require('../utils/logSanitizer');
+const { buildCampaignEmailTemplate } = require('../utils/emailTemplate');
+const { filterUnsubscribedRecipients, buildUnsubscribeUrl } = require('../services/unsubscribe.service');
 
 const router = express.Router();
 
@@ -173,8 +175,8 @@ router.post(
       // case variants (A@x vs a@x) collapsing onto a single BullMQ jobId while
       // still being stored as two logical recipients.
       const parsed = await parseRecipients(parsedRecipients.map((recipient) => String(recipient)).join('\n'));
-      const recipientList = parsed.validRecipients;
-      if (recipientList.length === 0) {
+      const rawRecipientList = parsed.validRecipients;
+      if (rawRecipientList.length === 0) {
         await removeSavedFiles(req);
         return res
           .status(400)
@@ -188,35 +190,22 @@ router.post(
         });
       }
 
+      // Check and exclude unsubscribed recipients
+      const { allowedRecipients: recipientList, excludedCount } = await filterUnsubscribedRecipients(rawRecipientList);
+      if (recipientList.length === 0) {
+        await removeSavedFiles(req);
+        return res.status(400).json({
+          success: false,
+          message: `All recipients (${excludedCount}) have previously unsubscribed from campaigns`,
+        });
+      }
+
       const maxRecipients = getMaxRecipientsPerCampaign();
       if (recipientList.length > maxRecipients) {
         await removeSavedFiles(req);
         return res.status(400).json({
           success: false,
           message: `Campaign exceeds the maximum of ${maxRecipients} recipients per campaign`,
-        });
-      }
-
-      // Suppression filtering: one indexed query for this user's suppressed
-      // addresses, applied AFTER validation and BEFORE anything is queued.
-      // Only the authenticated user's own suppressions can ever match.
-      const suppressedRows = await prisma.suppression.findMany({
-        where: { userId: req.user.id, email: { in: recipientList } },
-        select: { email: true, reason: true },
-      });
-      const suppressionReasonByEmail = new Map(
-        suppressedRows.map((row) => [row.email, row.reason])
-      );
-      const deliverableRecipients = recipientList.filter(
-        (email) => !suppressionReasonByEmail.has(email)
-      );
-      const suppressedCount = recipientList.length - deliverableRecipients.length;
-
-      if (deliverableRecipients.length === 0) {
-        await removeSavedFiles(req);
-        return res.status(400).json({
-          success: false,
-          message: `All ${suppressedCount} validated recipients are suppressed (unsubscribed or previously bounced); no campaign was created`,
         });
       }
 
@@ -244,18 +233,11 @@ router.post(
         });
 
         await tx.recipient.createMany({
-          // Every validated address keeps a row (nothing silently removed);
-          // suppressed ones are stored with an explanatory status instead of
-          // being queued.
-          data: recipientList.map((email) => {
-            const reason = suppressionReasonByEmail.get(email);
-            return {
-              campaignId: created.id,
-              email,
-              isValid: true,
-              ...(reason ? { status: 'BLOCKED', suppressReason: reason } : { status: 'PENDING' }),
-            };
-          }),
+          data: recipientList.map((email) => ({
+            campaignId: created.id,
+            email,
+            isValid: true,
+          })),
         });
 
         return created;
@@ -264,65 +246,88 @@ router.post(
       const from = buildFrom(senderName.trim());
       const attachmentDescriptors = attachmentsForJobs(attachmentFiles);
 
-      console.log(
-        `[campaign] created campaign ${campaign.id} for ${deliverableRecipients.length} recipients` +
-          (suppressedCount > 0 ? ` (${suppressedCount} suppressed)` : '')
-      );
+      console.log(`[campaign] created campaign ${campaign.id} for ${recipientList.length} recipients (unsubscribed excluded: ${excludedCount})`);
 
       const provider = getEmailProvider();
       const isBrevo = provider === 'brevo';
 
+      // Reply-to configuration: only configure if a valid reply-to is set or default to user email/smtp
+      const replyToEmail = (process.env.REPLY_TO_EMAIL || process.env.SMTP_USER || '').trim();
+      const replyTo = replyToEmail ? replyToEmail : undefined;
+
       if (isBrevo && attachmentDescriptors.length === 0) {
+        // Build base multipart template for batch jobs
+        const { html, text } = buildCampaignEmailTemplate({
+          senderName: senderName.trim(),
+          subject: subject.trim(),
+          content: body,
+          campaignId: campaign.id,
+        });
+
         await scheduleBrevoCampaign({
           campaignId: campaign.id,
-          recipients: deliverableRecipients,
+          recipients: recipientList,
           subject: subject.trim(),
-          text: body,
+          text,
+          html,
           sender: { name: senderName.trim() },
+          replyTo: replyTo ? { email: replyTo } : undefined,
         });
       } else {
-        const dailyLimit = isBrevo ? getDailyEmailLimit() : 0;
+        const dailyLimit = isBrevo ? Math.max(1, getDailyEmailLimit()) : 0;
         await emailQueue.addBulk(
-          deliverableRecipients.map((email, index) => ({
-            name: 'sendEmail',
-            data: {
-              from,
+          recipientList.map((email, index) => {
+            const unsubUrl = buildUnsubscribeUrl(email);
+            const { html, text } = buildCampaignEmailTemplate({
               senderName: senderName.trim(),
-              to: email,
               subject: subject.trim(),
-              text: body,
-              ...(attachmentDescriptors.length > 0 ? { attachments: attachmentDescriptors } : {}),
+              content: body,
+              unsubscribeUrl: unsubUrl,
               campaignId: campaign.id,
-              // Finalization denominator counts only queued recipients so a
-              // suppressed address can never stall campaign completion.
-              totalRecipients: deliverableRecipients.length,
-            },
-            opts: {
-              jobId: recipientJobId(campaign.id, email),
-              attempts: 3,
-              backoff: { type: 'exponential', delay: 5000 },
-              removeOnComplete: true,
-              removeOnFail: { age: 7 * 24 * 60 * 60 },
-              ...(isBrevo ? { delay: Math.floor(index / dailyLimit) * DAY_IN_MS } : {}),
-            },
-          }))
+            });
+
+            // RFC 8058 compliant headers for legitimate bulk email deliverability
+            const headers = {
+              'List-Unsubscribe': `<${unsubUrl}>`,
+              'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+              'X-Campaign-Id': campaign.id,
+            };
+
+            return {
+              name: 'sendEmail',
+              data: {
+                from,
+                senderName: senderName.trim(),
+                to: email,
+                subject: subject.trim(),
+                text,
+                html,
+                headers,
+                ...(replyTo ? { replyTo } : {}),
+                ...(attachmentDescriptors.length > 0 ? { attachments: attachmentDescriptors } : {}),
+                campaignId: campaign.id,
+                totalRecipients: recipientList.length,
+              },
+              opts: {
+                jobId: recipientJobId(campaign.id, email),
+                attempts: 3,
+                backoff: { type: 'exponential', delay: 5000 },
+                removeOnComplete: true,
+                removeOnFail: { age: 7 * 24 * 60 * 60 },
+                ...(isBrevo ? { delay: Math.floor(index / dailyLimit) * DAY_IN_MS } : {}),
+              },
+            };
+          })
         );
       }
 
-      console.log(
-        `[campaign] campaign ${campaign.id} fully queued for ${deliverableRecipients.length} recipients`
-      );
+      console.log(`[campaign] campaign ${campaign.id} fully queued for ${recipientList.length} recipients`);
 
       return res.status(201).json({
         success: true,
         id: campaign.id,
         status: campaign.status,
-        acceptedCount: deliverableRecipients.length,
-        suppressedCount,
-        message:
-          suppressedCount > 0
-            ? `Campaign created and queued for ${deliverableRecipients.length} recipients; ${suppressedCount} suppressed recipients were excluded`
-            : `Campaign created and queued for ${deliverableRecipients.length} recipients`,
+        message: `Campaign created and queued for ${recipientList.length} recipients`,
       });
     } catch (error) {
       console.error('Failed to create campaign:', sanitizeErrorMessage(error));

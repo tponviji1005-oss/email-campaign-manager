@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Eye, Search } from "lucide-react";
 import { AppShell, PageHeader } from "@/components/app-shell";
@@ -53,6 +53,11 @@ function HistoryPage() {
   const [term, setTerm] = useState(q ?? "");
   const [page, setPage] = useState(1);
   const [details, setDetails] = useState<CampaignSummary | null>(null);
+
+  // Keep the search input in sync when the URL changes (browser back/forward).
+  useEffect(() => {
+    setTerm(q ?? "");
+  }, [q]);
 
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["campaigns", page, q],

@@ -27,7 +27,7 @@ function splitIntoChunks(recipients, chunkSize) {
   return chunks;
 }
 
-function buildBrevoBatchJobs({ campaignId, recipients, subject, text, sender }) {
+function buildBrevoBatchJobs({ campaignId, recipients, subject, text, html, sender, replyTo }) {
   if (!campaignId) {
     throw new Error('buildBrevoBatchJobs requires a campaignId.');
   }
@@ -46,7 +46,9 @@ function buildBrevoBatchJobs({ campaignId, recipients, subject, text, sender }) 
       recipients: chunk,
       subject,
       text,
+      html,
       sender,
+      replyTo,
     },
     opts: {
       ...BATCH_JOB_OPTS,

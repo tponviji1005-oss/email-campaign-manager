@@ -166,20 +166,36 @@ async function reconcileCampaign(prisma, campaignId) {
     // counter increment and the DB finalization), or lost entirely.
     const [sent, failed] = await readCampaignCounters(campaignId);
     if (sent + failed >= totalRecipients) {
-      return finalizeCampaign(prisma, campaignId, failed > 0 ? 'FAILED' : 'SENT');
+      const status = failed === 0 ? 'SENT' : (sent > 0 ? 'PARTIAL' : 'FAILED');
+      return finalizeCampaign(prisma, campaignId, status);
+    }
+
+    // Check actual recipient status in database (survives Redis eviction/restart)
+    const dbRecipients = await prisma.recipient.findMany({
+      where: { campaignId },
+      select: { status: true },
+    });
+    const dbSentCount = dbRecipients.filter((r) => ['SENT', 'DELIVERED'].includes(r.status)).length;
+    const dbFailedCount = dbRecipients.filter((r) => ['FAILED', 'BOUNCED'].includes(r.status)).length;
+
+    if (dbSentCount + dbFailedCount >= totalRecipients) {
+      const status = dbFailedCount === 0 ? 'SENT' : (dbSentCount > 0 ? 'PARTIAL' : 'FAILED');
+      return finalizeCampaign(prisma, campaignId, status);
     }
 
     // With no pending work and incomplete counters, per-recipient delivery
     // markers are the remaining proof of success. Only mark SENT when every
-    // single recipient is proven delivered.
+    // single recipient is proven delivered, or PARTIAL if some succeeded.
     const delivered = await countDeliveredMarkers(campaignId);
-    if (delivered >= totalRecipients) {
+    const effectiveSent = Math.max(delivered, dbSentCount);
+    if (effectiveSent >= totalRecipients) {
       return finalizeCampaign(prisma, campaignId, 'SENT');
     }
+    if (effectiveSent > 0) {
+      return finalizeCampaign(prisma, campaignId, 'PARTIAL');
+    }
 
-    // No pending work and no proof that all recipients were delivered: the
-    // campaign cannot finish on its own. Marking it FAILED is the safe terminal
-    // state; SENT is never claimed without proof.
+    // No pending work and no proof that any recipients were delivered:
     return finalizeCampaign(prisma, campaignId, 'FAILED');
   } finally {
     try {

@@ -5,6 +5,7 @@ const styles: Record<string, string> = {
   draft: "bg-muted text-muted-foreground border-border",
   sending: "bg-warning/15 text-warning border-warning/30",
   sent: "bg-success/10 text-success border-success/20",
+  partial: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30",
   failed: "bg-destructive/10 text-destructive border-destructive/20",
 };
 

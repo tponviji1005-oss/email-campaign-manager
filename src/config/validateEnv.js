@@ -1,4 +1,4 @@
-const { getEmailProvider, getMissingBrevoVars } = require('./brevo');
+const { getEmailProvider, getMissingBrevoVars, validateBrevoEnv } = require('./brevo');
 const { validateSmtpEnv } = require('./mail');
 
 const SUPPORTED_PROVIDERS = ['brevo', 'gmail', 'smtp'];
@@ -129,10 +129,7 @@ function validateEnv() {
   }
 
   if (provider === 'brevo') {
-    const missing = getMissingBrevoVars();
-    if (missing.length > 0) {
-      throw new Error(`Missing required environment variable: ${missing[0]}`);
-    }
+    validateBrevoEnv();
   }
 
   if (provider === 'gmail' || provider === 'smtp') {

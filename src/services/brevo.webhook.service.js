@@ -2,30 +2,9 @@ const crypto = require('crypto');
 const { redisConnection } = require('../config/redis');
 const { getPrisma } = require('../config/prisma');
 const { sanitizeErrorMessage } = require('../utils/logSanitizer');
-const { setRecipientStatus } = require('../utils/recipientStatus');
 
 const DELIVERY_STATUS_TTL_SECONDS = 30 * 24 * 60 * 60;
 const TERMINAL_RANK = 30;
-
-// Persistent (PostgreSQL) suppression reasons for terminal failure outcomes.
-// Soft bounces and deferrals must never suppress an address.
-const SUPPRESSION_BY_STATUS = {
-  bounced: 'HARD_BOUNCE',
-  spam: 'SPAM',
-  blocked: 'BLOCKED',
-  invalid: 'INVALID',
-};
-
-// Recipient.status values persisted to PostgreSQL. deferred has no entry: it is
-// a transient Redis-only outcome.
-const RECIPIENT_STATUS_BY_EVENT = {
-  delivered: { status: 'DELIVERED', rank: TERMINAL_RANK },
-  hard_bounce: { status: 'BOUNCED', rank: TERMINAL_RANK },
-  blocked: { status: 'BLOCKED', rank: TERMINAL_RANK },
-  spam: { status: 'SPAM', rank: TERMINAL_RANK },
-  invalid_email: { status: 'INVALID', rank: TERMINAL_RANK },
-  soft_bounce: { status: 'SOFT_BOUNCED', rank: 20 },
-};
 
 // Brevo transactional webhook events we track, mapped to a normalized delivery
 // status. Ranks are used for idempotent severity ordering: a terminal outcome
@@ -127,12 +106,33 @@ function normalizeEvents(body) {
   return rawEvents;
 }
 
+const DB_STATUS_BY_STATUS = {
+  delivered: 'DELIVERED',
+  bounced: 'BOUNCED',
+  blocked: 'FAILED',
+  spam: 'BOUNCED',
+  invalid: 'FAILED',
+  soft_bounce: 'BOUNCED',
+  deferred: 'SENT',
+};
+
 function extractEvent(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const event = typeof raw.event === 'string' ? raw.event.trim() : '';
   const email = typeof raw.email === 'string' ? raw.email.trim().toLowerCase() : '';
-  const campaignId =
+  let campaignId =
     typeof raw.campaignId === 'string' && raw.campaignId.trim() ? raw.campaignId.trim() : null;
+
+  if (!campaignId && Array.isArray(raw.tags) && raw.tags.length > 0) {
+    campaignId = String(raw.tags[0]).trim();
+  }
+  if (!campaignId && raw['X-Campaign-Id']) {
+    campaignId = String(raw['X-Campaign-Id']).trim();
+  }
+  if (!campaignId && raw.headers && raw.headers['X-Campaign-Id']) {
+    campaignId = String(raw.headers['X-Campaign-Id']).trim();
+  }
+
   if (!event || !email) return null;
   return { event, email, campaignId };
 }
@@ -142,6 +142,8 @@ async function findCampaignIds(prisma, email, campaignId) {
   try {
     const rows = await prisma.recipient.findMany({
       where: { email },
+      orderBy: { createdAt: 'desc' },
+      take: 5,
       select: { campaignId: true },
     });
     return (rows || []).map((row) => row.campaignId);
@@ -161,37 +163,6 @@ async function recordDeliveryStatus(campaignId, email, mapping) {
     DELIVERY_STATUS_TTL_SECONDS,
     mapping.rank
   );
-}
-
-// The webhook payload never carries a userId; ownership always comes from the
-// campaign row the matched recipient belongs to.
-async function resolveCampaignOwner(prisma, campaignId) {
-  try {
-    const campaign = await prisma.campaign.findUnique({
-      where: { id: campaignId },
-      select: { userId: true },
-    });
-    return campaign ? campaign.userId : null;
-  } catch (error) {
-    console.error('Failed to resolve campaign owner:', sanitizeErrorMessage(error));
-    return null;
-  }
-}
-
-// Idempotent by the Suppression @@unique([userId, email]) constraint: the
-// upsert rewrites reason/source rather than creating duplicates.
-async function persistSuppression(prisma, userId, email, reason, source) {
-  await prisma.suppression.upsert({
-    where: { userId_email: { userId, email } },
-    update: { reason, source },
-    create: { userId, email, reason, source },
-  });
-}
-
-// Rank-guarded via the shared helper, so replayed or out-of-order events
-// (e.g. a late deferred after a delivered) cannot downgrade a terminal status.
-async function updateRecipientStatus(prisma, campaignId, email, next) {
-  return setRecipientStatus(prisma, campaignId, email, next.status);
 }
 
 async function handleBrevoWebhookPayload(body, ctx) {
@@ -229,38 +200,26 @@ async function handleBrevoWebhookPayload(body, ctx) {
 
       try {
         await recordDeliveryStatus(campaignId, ev.email, mapping);
+        const dbStatus = DB_STATUS_BY_STATUS[mapping.status];
+        if (dbStatus) {
+          await prisma.recipient.updateMany({
+            where: { campaignId, email: ev.email },
+            data: { status: dbStatus },
+          });
+        }
+
+        // Auto-suppress permanent failure recipients (hard bounce, spam complaint, blocked, invalid)
+        if (['bounced', 'spam', 'blocked', 'invalid'].includes(mapping.status)) {
+          const { unsubscribeEmail } = require('./unsubscribe.service');
+          await unsubscribeEmail(ev.email, `webhook_${mapping.status}`).catch((err) => {
+            console.error('Failed to auto-suppress bounced recipient:', sanitizeErrorMessage(err));
+          });
+        }
       } catch (error) {
         console.error('Failed to record delivery status:', sanitizeErrorMessage(error));
         continue;
       }
       matched = true;
-
-      const statusUpdate = RECIPIENT_STATUS_BY_EVENT[ev.event];
-      if (statusUpdate) {
-        try {
-          await updateRecipientStatus(prisma, campaignId, ev.email, statusUpdate);
-        } catch (error) {
-          console.error('Failed to update recipient status:', sanitizeErrorMessage(error));
-        }
-      }
-
-      const suppressionReason = SUPPRESSION_BY_STATUS[mapping.status];
-      if (suppressionReason) {
-        const userId = await resolveCampaignOwner(prisma, campaignId);
-        if (userId) {
-          try {
-            await persistSuppression(
-              prisma,
-              userId,
-              ev.email,
-              suppressionReason,
-              `webhook:${ev.event}`
-            );
-          } catch (error) {
-            console.error('Failed to persist suppression:', sanitizeErrorMessage(error));
-          }
-        }
-      }
     }
 
     if (matched) processed += 1;

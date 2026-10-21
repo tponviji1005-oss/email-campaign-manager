@@ -2,49 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const { getTransporterConfig } = require('../config/mail');
-const { getBrevoConfig, isBrevoConfigured, BREVO_API_BASE_URL, BREVO_TRANSACTIONAL_EMAIL_ENDPOINT } = require('../config/brevo');
-const { redactEmail, sanitizeErrorMessage } = require('../utils/logSanitizer');
 const {
-  buildUnsubscribePageUrl,
-  buildOneClickUnsubscribeUrl,
-} = require('../utils/unsubscribe');
+  getBrevoConfig,
+  isBrevoConfigured,
+  isBrevoSimulatedSend,
+  BREVO_API_BASE_URL,
+  BREVO_TRANSACTIONAL_EMAIL_ENDPOINT,
+} = require('../config/brevo');
+const { redactEmail, sanitizeErrorMessage } = require('../utils/logSanitizer');
 
 const BREVO_API_URL = `${BREVO_API_BASE_URL}${BREVO_TRANSACTIONAL_EMAIL_ENDPOINT}`;
-const BREVO_REQUEST_TIMEOUT_MS = 30_000;
-
-// Public origins used in per-recipient unsubscribe links. FRONTEND_URL hosts
-// the unsubscribe page; the API origin hosts the RFC 8058 one-click endpoint
-// (defaults to the local backend; set PUBLIC_BACKEND_URL in deployment).
-const FRONTEND_PUBLIC_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
-const BACKEND_PUBLIC_URL = (process.env.PUBLIC_BACKEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-const UNSUBSCRIBE_MARKER = '/unsubscribe?';
-
-// Campaign emails carry a per-recipient signed unsubscribe footer and the
-// List-Unsubscribe headers bulk senders are required to honor. Applied only
-// when the caller actually has campaign context; the marker check keeps the
-// footer from ever being appended twice across retries/re-entry.
-function withCampaignUnsubscribe(options, recipientEmail) {
-  const campaignId = options && options.campaignId;
-  if (typeof campaignId !== 'string' || !campaignId.trim() || !recipientEmail) {
-    return options;
-  }
-
-  const pageUrl = buildUnsubscribePageUrl(FRONTEND_PUBLIC_URL, campaignId, recipientEmail);
-  const oneClickUrl = buildOneClickUnsubscribeUrl(BACKEND_PUBLIC_URL, campaignId, recipientEmail);
-
-  let text = options.text;
-  if (typeof text === 'string' && !text.includes(UNSUBSCRIBE_MARKER)) {
-    text = `${text}\n\n——————————————————\nDon't want these emails? Unsubscribe: ${pageUrl}`;
-  }
-
-  const headers = {
-    ...(options.headers || {}),
-    'List-Unsubscribe': `<${oneClickUrl}>`,
-    'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-  };
-
-  return { ...options, text, headers };
-}
+const BREVO_REQUEST_TIMEOUT_MS = 30000;
 
 class BrevoApiError extends Error {
   constructor(message, options) {
@@ -55,17 +23,41 @@ class BrevoApiError extends Error {
       this.code = options.code;
       this.details = options.details;
       this.requestId = options.requestId;
+      // 4xx errors (except 429 rate limit) are permanent client errors and should not be retried
+      this.isPermanent = options.isPermanent !== undefined
+        ? options.isPermanent
+        : Boolean(options.status && options.status >= 400 && options.status < 500 && options.status !== 429);
     }
   }
 }
 
+function isPermanentError(error) {
+  if (!error) return false;
+  if (error.isPermanent) return true;
+  if (error.status && error.status >= 400 && error.status < 500 && error.status !== 429) return true;
+  // SMTP permanent 5xx response codes
+  if (error.responseCode && error.responseCode >= 500 && error.responseCode < 600) return true;
+  // Specific non-retryable SMTP / API codes
+  const code = String(error.code || '');
+  if (['EENVELOPE', 'INVALID_RECIPIENT', 'UNAUTHORIZED', 'FORBIDDEN'].includes(code)) return true;
+  return false;
+}
+
 let transporter = null;
 
-function createTransporter() {
+function createTransporter(customTransporter = null) {
+  if (customTransporter) {
+    transporter = customTransporter;
+    return transporter;
+  }
   if (!transporter) {
     transporter = nodemailer.createTransport(getTransporterConfig());
   }
   return transporter;
+}
+
+function setTransporter(mockTransporter) {
+  transporter = mockTransporter;
 }
 
 async function sendEmail(options) {
@@ -73,7 +65,7 @@ async function sendEmail(options) {
     throw new Error('Email options are required.');
   }
 
-  const { from, to, subject, text, html, attachments } = options;
+  const { from, to, subject, text, html, attachments, replyTo, headers } = options;
 
   if (!from) {
     throw new Error('Email options.from is required.');
@@ -92,20 +84,28 @@ async function sendEmail(options) {
   }
 
   const transporter = createTransporter();
-  const prepared = withCampaignUnsubscribe(options, typeof to === 'string' ? to : '');
+
+  const mailOptions = {
+    from,
+    to,
+    subject,
+    text,
+    html,
+    attachments,
+  };
+
+  if (replyTo && typeof replyTo === 'string' && replyTo.trim()) {
+    mailOptions.replyTo = replyTo.trim();
+  }
+
+  if (headers && typeof headers === 'object' && Object.keys(headers).length > 0) {
+    mailOptions.headers = headers;
+  }
 
   const tSendStart = Date.now();
   console.log(`[diag][sendmail] sendMail START at ${tSendStart}`);
   try {
-    await transporter.sendMail({
-      from,
-      to,
-      subject,
-      text: prepared.text,
-      html: prepared.html,
-      headers: prepared.headers,
-      attachments,
-    });
+    await transporter.sendMail(mailOptions);
   } catch (error) {
     console.error('[smtp][sendMail] failed. Error diagnostics:', {
       message: sanitizeErrorMessage(error),
@@ -195,7 +195,7 @@ async function toBrevoAttachments(attachments) {
   return converted;
 }
 
-function buildBrevoPayload({ sender, to, subject, text, html, attachments, tags, headers }) {
+function buildBrevoPayload({ sender, to, subject, text, html, attachments, tags, headers, replyTo }) {
   const brevo = getBrevoConfig();
 
   const payload = {
@@ -211,11 +211,34 @@ function buildBrevoPayload({ sender, to, subject, text, html, attachments, tags,
   if (text) payload.textContent = text;
   if (tags && Array.isArray(tags)) payload.tags = tags;
   if (headers && typeof headers === 'object') payload.headers = headers;
+  if (replyTo && typeof replyTo === 'object' && replyTo.email) {
+    payload.replyTo = replyTo;
+  } else if (typeof replyTo === 'string' && replyTo.trim()) {
+    payload.replyTo = { email: replyTo.trim() };
+  }
 
   return payload;
 }
 
-async function sendBrevoApiRequest(payload) {
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function sendBrevoApiRequest(payload, retryCount = 0) {
+  if (isBrevoSimulatedSend()) {
+    await sleep(25 + Math.floor(Math.random() * 25));
+    const recipientEmail = payload.to && payload.to[0] && payload.to[0].email;
+    if (recipientEmail && (recipientEmail.includes('fail') || recipientEmail.includes('invalid'))) {
+      throw new BrevoApiError(`Simulated Brevo API failure for recipient: ${recipientEmail}`, {
+        code: 'SIMULATED_RECIPIENT_FAILURE',
+        status: 400,
+      });
+    }
+    return {
+      success: true,
+      messageId: `<sim-${Date.now()}-${Math.random().toString(36).slice(2, 10)}@brevo-sim.local>`,
+      requestId: `req-sim-${Date.now()}`,
+    };
+  }
+
   if (!isBrevoConfigured()) {
     const { getMissingBrevoVars } = require('../config/brevo');
     throw new BrevoApiError(
@@ -250,6 +273,21 @@ async function sendBrevoApiRequest(payload) {
     );
   }
   clearTimeout(timeout);
+
+  // Handle HTTP 429 (Rate Limit) with bounded exponential backoff and Retry-After header
+  if (response.status === 429 && retryCount < 3) {
+    const retryAfterHeader = response.headers.get('retry-after');
+    const retryAfterSec = Number(retryAfterHeader);
+    const delayMs =
+      Number.isFinite(retryAfterSec) && retryAfterSec > 0
+        ? retryAfterSec * 1000
+        : Math.pow(2, retryCount) * 1000 + Math.floor(Math.random() * 500);
+    console.warn(
+      `[brevo] HTTP 429 Rate Limit encountered. Retrying in ${delayMs}ms (attempt ${retryCount + 1}/3)...`
+    );
+    await sleep(delayMs);
+    return sendBrevoApiRequest(payload, retryCount + 1);
+  }
 
   let body = null;
   try {
@@ -286,7 +324,7 @@ async function sendBrevoEmail(options) {
     throw new BrevoApiError('Brevo email options are required.');
   }
 
-  const { sender, to, subject, text, html, attachments, tags, headers } = options;
+  const { sender, to, subject, text, html, attachments, tags, headers, replyTo } = options;
 
   if (!to) {
     throw new BrevoApiError('Brevo email options.to is required.');
@@ -299,16 +337,7 @@ async function sendBrevoEmail(options) {
   }
 
   const recipient = normalizeBrevoRecipient(to);
-  const prepared = withCampaignUnsubscribe(options, recipient.email);
-  const payload = buildBrevoPayload({
-    sender,
-    to: [recipient],
-    subject,
-    text: prepared.text,
-    html: prepared.html,
-    tags,
-    headers: prepared.headers,
-  });
+  const payload = buildBrevoPayload({ sender, to: [recipient], subject, text, html, tags, headers, replyTo });
 
   const brevoAttachments = await toBrevoAttachments(attachments);
   if (brevoAttachments) {
@@ -318,17 +347,25 @@ async function sendBrevoEmail(options) {
   return sendBrevoApiRequest(payload);
 }
 
-// Number of concurrent Brevo API calls within a single batch job.
-// 5 keeps well under Brevo rate limits while being ~5× faster than
-// fully sequential sending (300 recipients: ~30s vs ~150s).
-const BREVO_BATCH_CONCURRENCY = 5;
-
 async function sendBrevoBatch(options) {
   if (!options || typeof options !== 'object') {
     throw new BrevoApiError('Brevo batch options are required.');
   }
 
-  const { sender, recipients, subject, text, html, attachments, tags, headers, onRecipientSent } = options;
+  const {
+    sender,
+    recipients,
+    subject,
+    text,
+    html,
+    attachments,
+    tags,
+    headers,
+    replyTo,
+    campaignId,
+    onRecipientSent,
+    onRecipientFailed,
+  } = options;
 
   if (!Array.isArray(recipients) || recipients.length === 0) {
     throw new BrevoApiError('Brevo batch options.recipients must be a non-empty array.');
@@ -340,60 +377,99 @@ async function sendBrevoBatch(options) {
     throw new BrevoApiError('Brevo batch options.text or options.html is required.');
   }
 
+  const brevoConfig = getBrevoConfig();
+  const concurrency = brevoConfig.concurrency || 4;
+  const chunkDelayMs = brevoConfig.chunkDelayMs !== undefined ? brevoConfig.chunkDelayMs : 500;
+
   const brevoAttachments = await toBrevoAttachments(attachments);
 
-  // Brevo sends a single email to every address listed in `to`, so one request
-  // with the full recipient list would put every address in the To field of a
-  // single message. Send one request per recipient so each recipient receives
-  // their own email with only their address in `to`.
-  //
-  // Process in chunks of BREVO_BATCH_CONCURRENCY to stay under Brevo rate
-  // limits while avoiding the ~150s wall-clock of fully sequential sends.
-  // If ANY recipient in a chunk fails the entire batch throws so BullMQ can
-  // retry — already-delivered recipients are filtered on the next attempt.
-  const messageIds = [];
-  for (let i = 0; i < recipients.length; i += BREVO_BATCH_CONCURRENCY) {
-    const chunk = recipients.slice(i, i + BREVO_BATCH_CONCURRENCY);
-    const chunkResults = await Promise.all(
-      chunk.map(async (recipient) => {
+  const batchTags = Array.isArray(tags) ? [...tags] : [];
+  if (campaignId && !batchTags.includes(campaignId)) {
+    batchTags.push(campaignId);
+  }
+
+  const batchHeaders = { ...(headers || {}) };
+  if (campaignId && !batchHeaders['X-Campaign-Id']) {
+    batchHeaders['X-Campaign-Id'] = campaignId;
+  }
+
+  const sent = [];
+  const failed = [];
+
+  for (let i = 0; i < recipients.length; i += concurrency) {
+    const chunk = recipients.slice(i, i + concurrency);
+
+    const chunkPromises = chunk.map(async (recipient) => {
+      let rawEmail = typeof recipient === 'string' ? recipient.trim() : (recipient && recipient.email ? String(recipient.email).trim() : 'unknown');
+      try {
         const normalized = normalizeBrevoRecipient(recipient);
-        // Per-recipient: the footer URL and headers embed a signature bound to
-        // this exact (campaignId, email) pair.
-        const prepared = withCampaignUnsubscribe(options, normalized.email);
+        rawEmail = normalized.email;
         const payload = buildBrevoPayload({
           sender,
           to: [normalized],
           subject,
-          text: prepared.text,
-          html: prepared.html,
-          tags,
-          headers: prepared.headers,
+          text,
+          html,
+          tags: batchTags.length > 0 ? batchTags : undefined,
+          headers: Object.keys(batchHeaders).length > 0 ? batchHeaders : undefined,
+          replyTo,
         });
         if (brevoAttachments) {
           payload.attachment = brevoAttachments;
         }
 
         const result = await sendBrevoApiRequest(payload);
-
         if (typeof onRecipientSent === 'function') {
-          await onRecipientSent(normalized.email);
+          await onRecipientSent(normalized.email, result.messageId);
         }
+        return { success: true, email: normalized.email, messageId: result.messageId };
+      } catch (error) {
+        const errorDetail = {
+          message: sanitizeErrorMessage(error),
+          code: error.code || 'SEND_ERROR',
+          status: error.status || 500,
+        };
+        if (typeof onRecipientFailed === 'function') {
+          await onRecipientFailed(rawEmail, errorDetail);
+        }
+        return { success: false, email: rawEmail, error: errorDetail };
+      }
+    });
 
-        return result.messageId;
-      })
-    );
-    messageIds.push(...chunkResults);
+    const chunkResults = await Promise.all(chunkPromises);
+
+    for (const res of chunkResults) {
+      if (res.success) {
+        sent.push({ email: res.email, messageId: res.messageId });
+      } else {
+        failed.push({ email: res.email, error: res.error });
+      }
+    }
+
+    // Controlled pacing between chunks
+    if (i + concurrency < recipients.length && chunkDelayMs > 0) {
+      await sleep(chunkDelayMs);
+    }
   }
 
-  return { success: true, sentCount: messageIds.length, messageIds };
+  return {
+    success: true,
+    sent,
+    failed,
+    sentCount: sent.length,
+    failedCount: failed.length,
+    totalAttempted: sent.length + failed.length,
+  };
 }
 
 module.exports = {
   createTransporter,
+  setTransporter,
   sendEmail,
   verifySmtp,
   sendBrevoEmail,
   sendBrevoBatch,
   toBrevoAttachments,
   BrevoApiError,
+  isPermanentError,
 };

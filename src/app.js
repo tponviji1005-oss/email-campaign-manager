@@ -88,7 +88,7 @@ app.use('/campaigns', campaignRoutes);
 app.use('/email', emailRoutes);
 app.use('/dashboard', dashboardRoutes);
 app.use('/webhooks', webhookRoutes);
-app.use('/api', unsubscribeRoutes);
+app.use('/unsubscribe', unsubscribeRoutes);
 
 // 404 for unknown routes: a consistent JSON body instead of Express's default
 // HTML "Cannot GET /..." page, so a missing route can never leak internals.

@@ -8,17 +8,31 @@ const EMPTY_RESULT = {
   totalInvalid: 0,
 };
 
+const DOMAIN_CONCURRENCY = 10;
+
+async function resolveDomainWithFallback(domain, sampleEmail) {
+  try {
+    return await validateMX(sampleEmail);
+  } catch (error) {
+    console.warn(
+      `DNS verification unavailable for ${domain} (${error.code || error.message}); keeping address valid`
+    );
+    return true;
+  }
+}
+
 async function parseRecipients(input) {
   if (typeof input !== 'string') {
     return { ...EMPTY_RESULT };
   }
 
   const seen = new Set();
-  const mxCache = new Map();
-  const validRecipients = [];
+  const validSyntaxRecipients = [];
   const invalidRecipients = [];
+  const domainToSampleEmail = new Map();
 
-  for (const part of input.split(/[\n,]+/)) {
+  // Normalize semicolons, commas, and newlines
+  for (const part of input.replace(/;/g, ',').split(/[\n,]+/)) {
     const recipient = part.trim();
     if (!recipient) continue;
 
@@ -32,22 +46,41 @@ async function parseRecipients(input) {
     }
 
     const domain = extractDomain(recipient);
-    let mxPromise = mxCache.get(domain);
-    if (mxPromise === undefined) {
-      mxPromise = validateMX(recipient).catch((error) => {
-        console.warn(
-          `DNS verification unavailable for ${domain} (${error.code || error.message}); keeping address valid`
-        );
-        return true;
-      });
-      mxCache.set(domain, mxPromise);
+    if (!domain) {
+      invalidRecipients.push(recipient);
+      continue;
     }
 
-    const hasMX = await mxPromise;
-    if (hasMX) {
-      validRecipients.push(recipient);
+    validSyntaxRecipients.push({ email: recipient, domain });
+    if (!domainToSampleEmail.has(domain)) {
+      domainToSampleEmail.set(domain, recipient);
+    }
+  }
+
+  // Resolve unique domains with bounded concurrency
+  const uniqueDomains = Array.from(domainToSampleEmail.keys());
+  const domainValidity = new Map();
+
+  for (let i = 0; i < uniqueDomains.length; i += DOMAIN_CONCURRENCY) {
+    const batch = uniqueDomains.slice(i, i + DOMAIN_CONCURRENCY);
+    const batchResults = await Promise.all(
+      batch.map(async (domain) => {
+        const sampleEmail = domainToSampleEmail.get(domain);
+        const isValid = await resolveDomainWithFallback(domain, sampleEmail);
+        return { domain, isValid };
+      })
+    );
+    for (const res of batchResults) {
+      domainValidity.set(res.domain, res.isValid);
+    }
+  }
+
+  const validRecipients = [];
+  for (const item of validSyntaxRecipients) {
+    if (domainValidity.get(item.domain)) {
+      validRecipients.push(item.email);
     } else {
-      invalidRecipients.push(recipient);
+      invalidRecipients.push(item.email);
     }
   }
 

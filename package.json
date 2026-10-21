@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/server.js",
     "start": "tsx src/server.js",
-    "prisma:generate": "prisma generate"
+    "prisma:generate": "prisma generate",
+    "test": "node --test --test-force-exit tests/**/*.test.js"
   },
   "repository": {
     "type": "git",
@@ -34,11 +35,11 @@
     "nodemailer": "^9.0.4",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
-    "pg": "^8.22.0",
-    "tsx": "^4.23.9"
+    "pg": "^8.22.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14",
-    "prisma": "^7.9.1"
+    "prisma": "^7.9.1",
+    "tsx": "^4.23.9"
   }
 }

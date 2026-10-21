@@ -1,97 +1,73 @@
 const express = require('express');
-const { getPrisma } = require('../config/prisma');
+const { verifyUnsubscribeToken, unsubscribeEmail } = require('../services/unsubscribe.service');
 const { sanitizeErrorMessage } = require('../utils/logSanitizer');
-const { unsubscribeLimiter } = require('../middleware/rateLimit');
-const {
-  normalizeEmail,
-  verifyUnsubscribeSignature,
-} = require('../utils/unsubscribe');
 
 const router = express.Router();
 
-// Public (session-less) endpoints: the HMAC signature over `${campaignId}:${email}`
-// is the only authority, so both routes are IP rate-limited and fail with one
-// generic message that never reveals whether a campaign or email exists.
-const INVALID_LINK_MESSAGE = 'Invalid or expired unsubscribe link.';
+/**
+ * GET /unsubscribe?email=...&token=...
+ * HTML landing page that lets users confirm unsubscribe with one click, or handles direct unsubscribe.
+ */
+router.get('/', async (req, res) => {
+  const email = typeof req.query.email === 'string' ? req.query.email.trim() : '';
+  const token = typeof req.query.token === 'string' ? req.query.token.trim() : '';
 
-function extractUnsubscribeInput(input) {
-  // Accept both the JSON field names and the short link query params (c/e/s).
-  const campaignId =
-    typeof input.campaignId === 'string' && input.campaignId.trim()
-      ? input.campaignId.trim()
-      : typeof input.c === 'string'
-        ? input.c.trim()
-        : '';
-  const rawEmail =
-    typeof input.email === 'string' && input.email.trim()
-      ? input.email
-      : typeof input.e === 'string'
-        ? input.e
-        : '';
-  const email = normalizeEmail(rawEmail);
-  const signature =
-    typeof input.signature === 'string' && input.signature.trim()
-      ? input.signature.trim()
-      : typeof input.s === 'string'
-        ? input.s.trim()
-        : '';
-  return { campaignId, email, signature };
-}
+  if (!email || !token || !verifyUnsubscribeToken(email, token)) {
+    return res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Invalid Request</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; min-height: 80vh; background: #f8fafc; color: #1e293b; margin: 0; padding: 20px;">
+        <div style="background: #ffffff; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); max-width: 440px; text-align: center;">
+          <h2 style="color: #ef4444; margin-top: 0;">Invalid or Expired Link</h2>
+          <p style="color: #64748b;">The unsubscribe link is invalid or has expired.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  }
 
-// Resolve the owning userId server-side from the campaign row. The client can
-// never name a user.
-async function resolveCampaignOwner(prisma, campaignId) {
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    select: { userId: true },
-  });
-  return campaign ? campaign.userId : null;
-}
+  // If one_click query param is present or standard GET click
+  try {
+    await unsubscribeEmail(email, 'web_link');
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html>
+      <head><title>Unsubscribed Successfully</title><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+      <body style="font-family: sans-serif; display: flex; align-items: center; justify-content: center; min-height: 80vh; background: #f8fafc; color: #1e293b; margin: 0; padding: 20px;">
+        <div style="background: #ffffff; padding: 32px; border-radius: 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); max-width: 440px; text-align: center;">
+          <h2 style="color: #10b981; margin-top: 0;">Unsubscribed Successfully</h2>
+          <p style="color: #64748b;"><strong>${email}</strong> has been unsubscribed from our marketing campaigns.</p>
+          <p style="font-size: 14px; color: #94a3b8; margin-top: 24px;">You will not receive further campaign emails from us.</p>
+        </div>
+      </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Failed to unsubscribe recipient:', sanitizeErrorMessage(error));
+    return res.status(500).send('An error occurred while processing your request.');
+  }
+});
 
-async function persistUnsubscribeSuppression(prisma, userId, campaignId, email) {
-  await prisma.suppression.upsert({
-    where: { userId_email: { userId, email } },
-    update: { reason: 'UNSUBSCRIBED', source: `unsubscribe:${campaignId}` },
-    create: { userId, email, reason: 'UNSUBSCRIBED', source: `unsubscribe:${campaignId}` },
-  });
-}
+/**
+ * POST /unsubscribe
+ * Handles RFC 8058 one-click List-Unsubscribe POST requests from mail clients (Gmail, Outlook).
+ */
+router.post('/', async (req, res) => {
+  const email = typeof req.query.email === 'string' ? req.query.email.trim() : (req.body && req.body.email);
+  const token = typeof req.query.token === 'string' ? req.query.token.trim() : (req.body && req.body.token);
 
-async function handleUnsubscribe(req, res) {
-  // The one-click variant arrives as a bare POST to the exact header URL, so
-  // its signed parameters are in the query string; the page-driven variant
-  // posts JSON. Query first, body wins.
-  const { campaignId, email, signature } = extractUnsubscribeInput({
-    ...req.query,
-    ...req.body,
-  });
-
-  if (!verifyUnsubscribeSignature(campaignId, email, signature)) {
-    return res.status(400).json({ success: false, message: INVALID_LINK_MESSAGE });
+  if (!email || !token || !verifyUnsubscribeToken(email, token)) {
+    return res.status(400).json({ success: false, message: 'Invalid or missing unsubscribe token' });
   }
 
   try {
-    const prisma = await getPrisma();
-    const userId = await resolveCampaignOwner(prisma, campaignId);
-    if (!userId) {
-      return res.status(400).json({ success: false, message: INVALID_LINK_MESSAGE });
-    }
-
-    // Idempotent by the Suppression @@unique([userId, email]) constraint.
-    await persistUnsubscribeSuppression(prisma, userId, campaignId, email);
-
-    // Deliberately minimal: no user, campaign, or recipient details.
-    return res.status(200).json({ success: true, message: 'Unsubscribed' });
+    await unsubscribeEmail(email, 'one_click_post');
+    return res.status(200).json({ success: true, message: 'Successfully unsubscribed' });
   } catch (error) {
-    console.error('Failed to process unsubscribe request:', sanitizeErrorMessage(error));
-    return res.status(500).json({ success: false, message: 'Failed to process unsubscribe request' });
+    console.error('Failed to handle POST unsubscribe:', sanitizeErrorMessage(error));
+    return res.status(500).json({ success: false, message: 'Failed to unsubscribe' });
   }
-}
-
-router.post('/unsubscribe', unsubscribeLimiter, handleUnsubscribe);
-
-// RFC 8058 one-click unsubscribe: mail clients POST this URL directly (no
-// Origin header, no session). Same signature check, same suppression, minimal
-// response body.
-router.post('/unsubscribe/one-click', unsubscribeLimiter, handleUnsubscribe);
+});
 
 module.exports = router;

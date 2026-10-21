@@ -96,19 +96,10 @@ const webhookLimiter = createRateLimiter({
   message: 'Too many webhook requests, please try again later',
 });
 
-// Unsubscribe endpoints are public writes; each signed link is only ever used
-// once or twice by a real recipient, so even a modest ceiling is generous.
-const unsubscribeLimiter = createRateLimiter({
-  windowMs: FIFTEEN_MINUTES,
-  max: 30,
-  message: 'Too many unsubscribe requests, please try again later',
-});
-
 module.exports = {
   createRateLimiter,
   authLimiter,
   campaignCreateLimiter,
   parseRecipientsLimiter,
   webhookLimiter,
-  unsubscribeLimiter,
 };
